@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import subprocess
 import sys
 
@@ -15,7 +16,15 @@ ROOT = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 FIXED_COMMAND = [sys.executable, "-m", "unittest", "discover", "-s", "prototype-acceptance-handoff/tests", "-v"]
 DISPLAY_COMMAND = "python3 -m unittest discover -s prototype-acceptance-handoff/tests -v"
-SOURCE_FILES = ("acceptance_harness.py", "tests/test_acceptance.py")
+# These are the complete executable evidence boundary.  Keep the runner and
+# verifier in the same manifest as the harness and its tests so evidence cannot
+# silently outlive a change to the machinery that produced or checks it.
+SOURCE_FILES = (
+    "acceptance_harness.py",
+    "tests/test_acceptance.py",
+    "run_evidence.py",
+    "verify_evidence.py",
+)
 CONTRACT_CASES = [
     "L1 hit", "L2 miss/fallback + L2->L1 backfill",
     "synchronous L1 write + durable outbox enqueue",
@@ -39,6 +48,11 @@ def source_manifest_hash(hashes: dict[str, str]) -> str:
     return sha256_bytes(payload)
 
 
+def stable_test_output(value: str) -> str:
+    """Remove unittest's nondeterministic elapsed-time rendering before hashing."""
+    return re.sub(r"(Ran \d+ tests? in )\d+(?:\.\d+)?s", r"\g<1><elapsed>", value)
+
+
 def git(*args: str) -> str:
     return subprocess.check_output(["git", "-C", str(REPO_ROOT), *args], text=True).strip()
 
@@ -48,8 +62,18 @@ def worktree_state() -> list[str]:
     # part of the state it records. All source and unrelated working-tree
     # changes remain visible and are bound to the evidence.
     evidence_rel = "prototype-acceptance-handoff/evidence.json"
-    return [line for line in git("status", "--porcelain=v1", "--untracked-files=all").splitlines()
-            if line[3:] != evidence_rel]
+    paths = []
+    for line in git("status", "--porcelain=v1", "--untracked-files=all").splitlines():
+        if not line:
+            continue
+        # Porcelain v1 normally has two status columns and a separating space
+        # (" M path"), but accepting the compact "M path" form makes this
+        # parser safe for mocked/portable git output too.
+        path = line[3:] if len(line) > 2 and line[2] == " " else line[2:]
+        path = path.lstrip()
+        if path != evidence_rel:
+            paths.append(line)
+    return paths
 
 
 # Keep the environment bounded and prevent an ambient PYTHONPATH from changing the harness.
@@ -80,8 +104,8 @@ summary = {
     "test_argv": FIXED_COMMAND,
     "test_stdout": run.stdout,
     "test_stderr": run.stderr,
-    "test_stdout_sha256": sha256_bytes(run.stdout.encode()),
-    "test_stderr_sha256": sha256_bytes(run.stderr.encode()),
+    "test_stdout_sha256": sha256_bytes(stable_test_output(run.stdout).encode()),
+    "test_stderr_sha256": sha256_bytes(stable_test_output(run.stderr).encode()),
     "source_files": hashes,
     "source_manifest_sha256": source_manifest_hash(hashes),
     "provenance": {
