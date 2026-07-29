@@ -27,18 +27,18 @@
   "source_files": {
     "acceptance_harness.py": "f26ee28b5c13b0f889f249bb612839837d8c0f593547e64b6f06f58b398c9a65",
     "tests/test_acceptance.py": "d5f0d4c6de2ee2a199c5160eebaeda91559a038219d4329bda52bc252a881261",
-    "run_evidence.py": "5c3a9fac2c555e340a7fd138b11618e094b650cfd434b7b756d588fdea375465",
-    "verify_evidence.py": "e8ca7926a09c530c7b1829f941e6361e0a7c3108c3528841233dc151f782046d"
+    "run_evidence.py": "59f224ba4f5eed60e2676fa2d4b220ce53a9a1d15c8b9d823a258bfbc4e65aab",
+    "verify_evidence.py": "d24d6a879f060637cbaeb185e3688f023b568dca879fc0f04d8d9b7817302fd4"
   },
-  "source_manifest_sha256": "d69f0cd898ffdf7f5fae5aabb5ff8aafc887fd5dfcc1ff98f2d7fce838d87eb9",
+  "source_manifest_sha256": "cf118cdcd2f81d52f351318ec8faef3d5a388bd5dd39a229a38442c2deae16f8",
   "provenance": {
     "repository_root": ".",
-    "source_revision": "8b450b1d6d1e21b09ced7b22bf40b3761c4b1bc1",
+    "source_revision": "84ca210deccab6b834f0ffd4b5e8c3edf12046c8",
     "worktree_dirty": false,
     "worktree_status": [],
     "worktree_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "runner_source_sha256": "5c3a9fac2c555e340a7fd138b11618e094b650cfd434b7b756d588fdea375465",
-    "verifier_source_sha256": "e8ca7926a09c530c7b1829f941e6361e0a7c3108c3528841233dc151f782046d",
+    "runner_source_sha256": "59f224ba4f5eed60e2676fa2d4b220ce53a9a1d15c8b9d823a258bfbc4e65aab",
+    "verifier_source_sha256": "d24d6a879f060637cbaeb185e3688f023b568dca879fc0f04d8d9b7817302fd4",
     "interpreter": "3.13.5 (main, Jun 13 2026, 14:18:01) [GCC 14.2.0]",
     "interpreter_executable": "/usr/bin/python3",
     "platform": "Linux-6.12.96+deb13-amd64-x86_64-with-glibc2.41",
