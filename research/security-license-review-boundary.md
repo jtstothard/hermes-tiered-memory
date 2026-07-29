@@ -1,7 +1,7 @@
 # Issue #9 research: pre-publish security and license review boundary
 
 Date: 2026-07-29  
-Repository evidence revision: `d762f28353ca6cb5ddd65bdf4a706842131226df` (the immutable commit resolved as `HEAD` when this revision of the report was edited). The earlier draft named `5a3b010`; that is historical context only and is not the evidence revision for this report.
+Repository evidence revision: `6b55b3674069d0cace51cbd414a5d8ed95f18aab` (the exact reviewed commit for this report). The earlier draft named `d762f28353ca6cb5ddd65bdf4a706842131226df`, and the still earlier `5a3b010`, are historical context only and are not the evidence revision for this report.
 
 ## Scope and evidence policy
 

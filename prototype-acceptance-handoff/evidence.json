@@ -1,6 +1,13 @@
 {
   "harness": "08-prototype-acceptance-handoff",
   "status": "PASS",
+  "release_gate_status": "BLOCKED",
+  "evidence_classification": {
+    "catalog_status": "NON_CATALOG",
+    "boundary": "synthetic/fake-boundary",
+    "release_gate_valid": false,
+    "reason": "Prototype tests use stdlib fakes and a local file-backed outbox; they do not exercise the pinned real Hermes loader, a release artifact, a declared matrix cell, or release-gate provenance."
+  },
   "test_exit_code": 0,
   "test_command": "python3 -m unittest discover -s tests -v",
   "test_stdout": "",

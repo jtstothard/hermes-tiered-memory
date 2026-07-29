@@ -3,6 +3,23 @@
   "catalog_id": "issue-8-release-assertions",
   "version": 1,
   "status": "contract-only",
+  "release_context": {
+    "release_version": null,
+    "required_from_release": 2,
+    "omission_allowed_before_release": true,
+    "omission_reason": "The first release has no prior release artifact to restore; it may only prove human-approved uninstall/disable recovery to the prior non-plugin configuration.",
+    "validator_rule": {
+      "release_version_type": "integer|null",
+      "release_version_null_action": "BLOCKED",
+      "required_when": "release_version >= required_from_release",
+      "required_action": "rollback gate must have one evidence object per listed matrix cell",
+      "omission_condition": "release_version != null AND release_version < required_from_release AND omission_allowed_before_release == true",
+      "omission_action": "OMITTED_ALLOWED",
+      "omission_disallowed_action": "BLOCKED",
+      "blocked_requires_non_empty_blocker": true,
+      "blocked_never_satisfies_required_gate": true
+    }
+  },
   "gates": [
     {"id": "bootstrap", "required": true, "assertions": ["bootstrap.sidecar_trusted", "bootstrap.wheel_hash_matches", "bootstrap.payload_allowlist", "bootstrap.activation_symlink"]},
     {"id": "loader-discovery", "required": true, "assertions": ["loader.discovery.direct_plugin_path", "loader.discovery.registers_composite", "loader.discovery.fresh_process"]},
@@ -14,7 +31,7 @@
     {"id": "adapter-contract", "required": true, "assertions": ["adapter.contract_pass"]},
     {"id": "outbox-restart", "required": true, "assertions": ["outbox.restart_recovery"]},
     {"id": "health-cli", "required": true, "assertions": ["health.status_and_tools", "cli.exit_contract"]},
-    {"id": "rollback", "required": false, "required_from_release": 2, "first_release_exception": "uninstall-disable-recovery-only", "assertions": ["rollback.restore_invariant"]},
+    {"id": "rollback", "required": false, "required_from_release": 2, "omission_allowed_before_release": true, "omission_reason": "No previous release artifact exists for release 1; only uninstall/disable recovery may be validated.", "assertions": ["rollback.restore_invariant"]},
     {"id": "artifact-authenticity", "required": true, "assertions": ["artifact.tag_verified", "artifact.attestation_verified"]},
     {"id": "package-content", "required": true, "assertions": ["package.file_list", "package.no_secrets"]}
   ],
@@ -36,7 +53,7 @@
     "uniqueness": "each tuple appears exactly once; stable cell id is SHA-256 of the UTF-8 JCS tuple array [python, platform, artifact_variant]",
     "applicability": "include a tuple only when its artifact variant is declared applicable for that exact Python/platform pair; do not infer missing tuples by Cartesian expansion",
     "cardinality": "count(the ordered tuple array at source)",
-    "evidence_rule": "each required gate has exactly one evidence object per listed cell; no evidence is valid while cells.state is BLOCKED; optional gates are BLOCKED or omitted only under the gate's omission rule",
+    "evidence_rule": "each required gate has exactly one evidence object per listed cell; no evidence is valid while cells.state is BLOCKED; optional gates are BLOCKED or omitted only under release_context.validator_rule and the gate's omission fields",
     "artifact_reuse": "an immutable artifact hash may occur in multiple explicitly listed cells, but each cell requires independent run-scoped evidence"
   },
   "id_rules": {

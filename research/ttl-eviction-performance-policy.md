@@ -2,7 +2,18 @@
 
 Date: 2026-07-29
 Repository: `jtstothard/hermes-tiered-memory`
-Pins: Mnemosyne `v3.14.0` (`4e5ed14`), Hindsight `v0.8.6` (`08995e3`).
+Evidence revision: `6b55b3674069d0cace51cbd414a5d8ed95f18aab`.
+
+## Immutable source provenance
+
+The source observations below are bound to these exact upstream commits; short SHAs are not used as evidence:
+
+| Source | Version/ref | Full commit SHA | Retrieval URL | Retrieval/verification metadata | Source/artifact hash record |
+|---|---|---|---|---|---|
+| Mnemosyne | `v3.14.0` | `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce` | [`tree`](https://github.com/mnemosyne-oss/mnemosyne/tree/4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce) | The cited evidence identifies this as the peeled commit for `v3.14.0`; a release-grade retrieval timestamp, media type, and verification transcript were not retained in this report. **UNRESOLVED/BLOCKING for release evidence.** | Commit SHA above is the source identity. Review-time SHA-256 observations (raw bytes, not retained here): `mnemosyne/core/config.py` = `9ba8ffa306c7ca9b76481589138214b0fca08f2084dec1d7ebad79329268bb4e`; `mnemosyne/core/beam.py` = `3360b553773d03b9f0c068e2fd01090b76630df92de38128bcc8a5b0ed817ced`. **Artifact bytes and a durable manifest are not retained; unresolved/blocking until archived.** |
+| Hindsight | `v0.8.6` | `08995e3013858e705fb4ca27c0ade3a286ef4750` | [`tree`](https://github.com/vectorize-io/hindsight/tree/08995e3013858e705fb4ca27c0ade3a286ef4750) | Exact commit is cited by the reviewed evidence. A release-grade retrieval timestamp, media type, and verification transcript were not retained in this report. **UNRESOLVED/BLOCKING for release evidence.** | Commit SHA above is the source identity. Review-time SHA-256 observation (raw bytes, not retained here): [`hindsight-clients/go/api/openapi.yaml`](https://raw.githubusercontent.com/vectorize-io/hindsight/08995e3013858e705fb4ca27c0ade3a286ef4750/hindsight-clients/go/api/openapi.yaml) = `419131d6744d6d28177b779b9efa02f8a1473ca7b58cc578e4036b5aebaef9d3`. **Artifact bytes and a durable manifest are not retained; unresolved/blocking until archived.** |
+
+The review-time raw-file hashes were computed on 2026-07-29T22:29:29Z from the exact raw URLs above; they are observations, not retained evidence. Do not claim that the source/artifact bytes remain available, reproducible, or verified from this report alone. Before release, archive the exact bytes, URL, media type, UTC retrieval time, commit/ref verification result, SHA-256 manifest, and the command/tool versions used. If any full SHA or artifact hash cannot be re-established, mark the affected claim unresolved/blocking rather than substituting a tag or short SHA.
 
 ## Scope and evidence policy
 
@@ -100,9 +111,11 @@ Hindsight bootstrap = PostgreSQL + pgvector extension + HNSW index creation. For
 The outbox accumulates `promoted` (completed) and `quarantined` rows. Without compaction it grows unbounded.
 
 **Policy:**
-- `promoted` rows: delete after a retention window (default 7 days). They exist only for audit/replay verification; once the retention window passes, they're safe to remove.
-- `quarantined` rows: retain indefinitely until reconciled (either successfully promoted via sweep/CLI, or manually cleared). A quarantined row that's been stuck for >30 days should surface as a persistent alert (feeds the #4 sweep alert threshold).
-- Compaction runs as part of the drain thread's idle cycle (when no pending rows): `DELETE FROM outbox WHERE status='promoted' AND updated_at < (now - 7 days) LIMIT 1000`.
+- `promoted` rows: eligible for archival and later deletion after a retention window (default 7 days). They are not “safe to remove” merely because the age test matches: #6's archive-before-delete contract is authoritative.
+- `quarantined` rows: retain until reconciled or an explicitly authorized manual-clear operation. A quarantined row stuck for >30 days should surface as a persistent alert (feeds the #4 sweep alert threshold); automatic compaction must not delete it.
+- Compaction is a bounded candidate-selection operation, never direct ad-hoc deletion SQL. It must use #6's committed transition watermark, immutable snapshot membership, deterministic ordering, per-row archival lease/CAS, expected `state_version`/revision fence, and exclusion of active reconciliation/replay membership. A concurrent transition or fence failure skips the row and emits the required audit event.
+- For each candidate, write and verify an immutable archive containing the row identity, final state, final `state_version`, transition/attempt/operation IDs, timestamps, error taxonomy, and canonical keyed digest of the redacted audit record. Retain archive and audit records for the implementation-gate retention period. Only then may the live row be deleted through the authorized #6 archive-before-delete path; the deletion/expiry itself must be an audit event with archive ID, policy version, actor, timestamp, watermark, and archive digest. A row must never disappear from both live and archive sets.
+- The deletion worker must process the deterministic ordered snapshot in bounded batches and use watermark/state-version/fence CAS. It must not issue an ad-hoc table-wide deletion statement, use `LIMIT` without an ordered immutable candidate set, or treat lease expiry as authorization. Deletion is destructive/always-ask at rollout and requires explicit approval plus a tested recovery path. Manual clear is a separate authorized operation, scoped to an explicit profile/bank/row set, confirmation-gated, archived/audited, and never an implicit consequence of retry or compaction.
 
 ## Performance budget summary
 
@@ -126,4 +139,4 @@ The outbox accumulates `promoted` (completed) and `quarantined` rows. Without co
 
 ## Concise recommendation for issue #7
 
-Adopt Mnemosyne's native 3-tier defaults (WM 10k items / 7-day TTL → EP 50k / 30-day → SP 1k / 180-day, weights 1.0/0.5/0.25) for L1; do not invent a parallel eviction system. Hindsight (L2) has no native TTL — default to no eviction for v1 (growth bounded by L1 promotion volume), with document-level eviction as a future option. Compact the outbox by deleting `promoted` rows after 7 days and retaining `quarantined` rows until reconciled. Performance budget: L1 prefetch <500ms, L2 prefetch <8s (Hermes hard limit), sync writes non-blocking, promotion async via outbox. Measure L1 growth rate, sleep latency, L2 recall/index latency, and embedding-model alignment at live-spike time before locking final numbers.
+Adopt Mnemosyne's native 3-tier defaults (WM 10k items / 7-day TTL → EP 50k / 30-day → SP 1k / 180-day, weights 1.0/0.5/0.25) for L1; do not invent a parallel eviction system. Hindsight (L2) has no native TTL — default to no eviction for v1 (growth bounded by L1 promotion volume), with document-level eviction as a future option. Compact the outbox by selecting aged `promoted` rows only through #6's archive-before-delete, watermark/state-version/fence CAS, deterministic ordering, audit, retention, and authorized manual-clear contract; retain `quarantined` rows until reconciled or explicitly cleared under that same evidence-preserving path. No direct DELETE SQL is part of this policy. Performance budget: L1 prefetch <500ms, L2 prefetch <8s (Hermes hard limit), sync writes non-blocking, promotion async via outbox. Measure L1 growth rate, sleep latency, L2 recall/index latency, and embedding-model alignment at live-spike time before locking final numbers.

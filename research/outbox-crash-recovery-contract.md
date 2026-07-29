@@ -34,7 +34,7 @@ outbox
   content         TEXT    NOT NULL          -- snapshot at enqueue time
   metadata        TEXT    NOT NULL          -- JSON: profile, bank, origin, provenance
   status          TEXT    NOT NULL DEFAULT 'pending'
-                  -- pending | in_flight | promoted | quarantined
+                  -- pending | in_flight | uncertain | promoted | quarantined
   attempt_no      INTEGER NOT NULL DEFAULT 0 -- 1..5 in the current worker cycle
   retry_cycle_no  INTEGER NOT NULL DEFAULT 0 -- increments for each quarantine retry path
   quarantine_origin_at INTEGER                 -- durable first quarantine age origin
@@ -51,11 +51,11 @@ outbox
 
 `operation_attempt` is append-only and MUST additionally contain non-null `retry_cycle_no` copied from the locked outbox row, plus `snapshot_id`, `run_id`, `snapshot_fence`, `row_fence`, and `ordering_fence` (nullable only where the operation is not snapshot-owned), and enforce `UNIQUE(row_id/outbox_id, retry_cycle_no, attempt_no)` as the durable attempt slot; duplicate allocation is rejected/audited and never sends remotely. `transition_audit` MUST include a durable monotonic `transition_seq` allocated transactionally from a per-bank/profile `transition_sequence` row. The durable per-document `document_ordering(document_id PRIMARY KEY, ordering_version, eligible_revision, terminal_revision, terminal_outcome, owner_id, lease_id, lease_expires_at, fence)` ledger is the serialization point for newer revisions. `sweep_run(run_id PRIMARY KEY, cadence_slot, owner_id, fence, lease_expires_at, status, transition_watermark, quota_policy_version, audit_scope, alert_scope)` owns each automatic sweep; uniqueness is partial-live (`UNIQUE(run_kind, cadence_slot) WHERE status='running'`) so an expired run is first fenced/marked `aborted`, then a replacement can claim the same slot. Issue #6 defines the complete columns, foreign keys, and CAS semantics for these records.
 
-UNIQUE(document_id, mnemosyne_rev)          -- idempotency constraint
+UNIQUE(document_id, mnemosyne_rev)          -- logical enqueue uniqueness; not remote idempotence
 INDEX(status, next_retry_at)                -- drain worker query
 ```
 
-The `UNIQUE(document_id, mnemosyne_rev)` constraint deduplicates only the logical enqueue; it does not represent an attempt and MUST NOT block multiple attempts. Issue #6's durable `operation_attempt` table is append-only and contains `attempt_id`, `outbox_id`, `(document_id, mnemosyne_rev, operation_kind)`, opaque provider `operation_id`, non-null `retry_cycle_no`, `attempt_no`, `snapshot_id` (nullable only for non-snapshot work), `run_id`, `snapshot_fence` (nullable only for non-snapshot work), non-null `row_fence` and `ordering_fence`, status, request/outcome timestamps, bounded error classification, and provider status reference. `transition_audit` records every CAS transition. The source L1 write, outbox row creation/upsert, and initial audit are one ATTACH transaction; lease/fence claim, operation-ID persistence, and `in_flight` transition are durable before remote send; outcome and local transition/audit commit atomically with expected `state_version` and fence. This is the complete durable contract; the mutable `attempt_no` is only a materialized current-cycle counter, not the attempt history.
+The `UNIQUE(document_id, mnemosyne_rev)` constraint deduplicates only the logical enqueue; it does not represent an attempt and MUST NOT block multiple attempts. It is not evidence that Hindsight replace is idempotent. Issue #6's durable `operation_attempt` table is append-only and contains `attempt_id`, `outbox_id`, `(document_id, mnemosyne_rev, operation_kind)`, opaque provider `operation_id`, non-null `retry_cycle_no`, `attempt_no`, `snapshot_id` (nullable only for non-snapshot work), `run_id`, `snapshot_fence` (nullable only for non-snapshot work), non-null `row_fence` and `ordering_fence`, status, request/outcome timestamps, bounded error classification, and provider status reference. `transition_audit` records every CAS transition. The source L1 write, outbox row creation/upsert, and initial audit are one ATTACH transaction; lease/fence claim, operation-ID persistence, and `in_flight` transition are durable before remote send; outcome and local transition/audit commit atomically with expected `state_version` and fence. This is the complete durable contract; the mutable `attempt_no` is only a materialized current-cycle counter, not the attempt history.
 
 ### 4. Transient vs permanent failure classification
 
@@ -76,13 +76,13 @@ The budget is **five total remote attempts**, numbered `attempt_no=1..5`, not fi
 
 - **`initialize()`** starts a dedicated background drain thread (daemon) and runs an immediate drain-on-restart replay. For `in_flight` rows, the Issue #6 reconciliation/lease contract supersedes the former blanket-reset wording: recover only an expired lease by CAS, incrementing the fencing token; do not reset an unexpired lease or resubmit an uncertain remote operation.
 - **`close()`** stops the thread within the 5s teardown cap. The thread is daemon, so anything still running past the window dies with the interpreter.
-- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, and updates to `promoted` or back to `pending` (with incremented `attempt_no` and `next_retry_at`) or `quarantined` (attempts exhausted or permanent failure). Sleeps when no work. Lease expiry, fencing, and uncertain remote-operation recovery are governed by Issue #6; this section does not authorize a blind `in_flight` reset.
+- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, and updates to `promoted`, `pending` (with incremented `attempt_no` and `next_retry_at`), `uncertain`, or `quarantined` (attempts exhausted or permanent failure). It never selects `uncertain` for ordinary send. Sleeps when no work. Lease expiry, fencing, and uncertain remote-operation recovery are governed by Issue #6; this section does not authorize a blind `in_flight` reset.
 
-### 7. Idempotency key — `(document_id, mnemosyne_revision)`
+### 7. Logical identity and retry safety — `(document_id, mnemosyne_revision)`
 
 - Same `(document_id, mnemosyne_rev)` already `promoted` → drain skips it (completed duplicate).
 - `mnemosyne_rev` incremented → genuine update, re-promote via Hindsight `replace` (deletes prior document, processes new).
-- Enforced by the `UNIQUE(document_id, mnemosyne_rev)` constraint: a duplicate enqueue within the same transaction is an upsert/no-op, not an error.
+- Enforced by the `UNIQUE(document_id, mnemosyne_rev)` constraint: a duplicate enqueue within the same transaction is a logical enqueue deduplication, not proof of remote idempotence. Remote retry safety requires the durable outbox, a persisted caller `operation_id`, and provider-supported status lookup; duplicate suppression remains live-evidence gated.
 - The ordering ledger is authoritative: enqueueing a newer revision records it as waiting unless it is the ledger's current `eligible_revision`; terminal outcome of the older revision and advancement of `ordering_version`/next eligibility are one owner/fence/CAS transaction. A worker that cannot acquire the current ledger and row fences MUST NOT submit the newer revision. This preserves ordering across restart and concurrent workers; a process-local queue or scan is not sufficient.
 
 ### 7.1 Durable transition and attempt allocation
@@ -90,6 +90,12 @@ The budget is **five total remote attempts**, numbered `attempt_no=1..5`, not fi
 Every state/lease/fence transition allocates one `transition_seq` from the durable sequence row and writes the transition audit in the same transaction. The sequence is monotonic for committed transitions and is not generated in memory. Before remote send, the worker atomically claims the `(outbox_id, retry_cycle_no, attempt_no)` slot and persists the operation ID plus `in_flight` transition. A uniqueness conflict is a duplicate-attempt rejection: audit it with the existing attempt ID, do not send, and reconcile the existing attempt. Outcome, ordering advancement, and local transition/audit remain one CAS transaction.
 
 Remote-send authorization is durable: the committed pre-send record MUST include the operation ID, applicable snapshot/run IDs, row/ordering/snapshot fences, owner/lease identity, state/version predicates, and the authorization decision. Immediately before send, the worker MUST revalidate the active lease and all current fences; the external request cannot be part of the database CAS, so lease expiry after validation may still leave an accepted remote request. Recovery MUST mark that attempt uncertain, must not claim fencing cancelled the remote work, and must status-reconcile the persisted operation ID before any resubmission.
+
+### 7.2 Uncertain remote outcome is a durable non-terminal state
+
+`uncertain` is an explicit durable outbox state, not a transient in-memory condition and not success. It is entered when a request may have reached Hindsight but the outcome is not established (lost response, timeout, crash around send, lease loss during send, or status lookup failure). The row remains excluded from ordinary draining and newer revisions remain ordered behind it. The attempt record retains the operation ID, request evidence, provider status reference when available, and the reason/deadline for uncertainty.
+
+Reconciliation MUST status-look up the persisted operation ID before any resubmission, using the provider capability gate in Issue #6. Resolution is bounded by a configured lookup deadline and retry schedule. A confirmed success transitions `uncertain -> promoted`; a confirmed retryable or permanent failure transitions to the corresponding retry/quarantine path with the original evidence retained. If the bounded lookup window ends without a provider-confirmed outcome, the row remains durably `uncertain` and is marked unresolved/degraded, with an alert and a subsequent bounded reconciliation deadline. It MUST NOT be silently dropped, treated as healthy, or resubmitted merely because the lookup deadline expired. A separately authorized operator/provider-resolution action may establish the prior outcome; only then may the row transition to `pending` with a new operation ID or to `quarantined`. This preserves no-silent-drop while preventing unproven duplicate remote work.
 ### 8. Permanent failure — quarantine, halt only that document, leave L1 intact
 
 A `quarantined` row records `last_error`, `last_http_status`, and `attempt_no=5` (or the terminal-failure attempt number), plus its `retry_cycle_no`. The drain continues processing other documents — a permanent failure on one record never blocks the queue. The L1 (Mnemosyne) entry that produced the quarantined promotion **remains valid** — the memory is stored at L1; only L2 promotion is blocked pending reconciliation.
@@ -106,24 +112,25 @@ The periodic sweep means a genuinely-permanent-permanent row is retried every 30
 
 ### 10. Checkpoint / queue-drained semantics
 
-**Queue drained = no row is currently `pending` or `in_flight`**, i.e. `pending == 0 AND in_flight == 0`; this does not mean every row is healthy. `quarantined` is terminal only for the current delivery-attempt cycle and remains an active recovery condition under Issue #6. The health surface MUST therefore report queue-drained separately from operational health, and must not describe a quarantined queue as “all rows terminal” without that qualification.
+**Queue drained = no row is currently `pending`, `in_flight`, or `uncertain`**, i.e. `pending == 0 AND in_flight == 0 AND uncertain == 0`; this does not mean every row is healthy. `uncertain` is a non-terminal active recovery condition. `quarantined` is terminal only for the current delivery-attempt cycle and remains an active recovery condition under Issue #6. The health surface MUST therefore report queue-drained separately from operational health, and must not describe a quarantined or uncertain queue as “all rows terminal.”
 
 The operator surface reports:
-- `drained: true/false` (no pending/in-flight rows)
+- `drained: true/false` (no pending/in-flight/uncertain rows)
 - `promoted: N`
-- `quarantined: N` (visible separately, does not block `drained`)
+- `uncertain: N` (visible separately and blocks `drained`)
+- `quarantined: N` (visible separately; does not block `drained` but blocks operational health)
 
 ## Safety invariants
 
 1. **Never lose a promotion** — the atomic commit guarantees the enqueue and L1 write land together or not at all.
 2. **Never block the queue** — quarantine halts only the failing document; the drain continues.
-3. **Never silently drop** — every row reaches a terminal state (`promoted` or `quarantined`); there is no "lost" state.
+3. **Never silently drop** — every unresolved row remains durably represented as `pending`, `in_flight`, `uncertain`, `promoted`, or `quarantined`; `uncertain` is explicitly non-terminal and has bounded status-reconciliation, health, alert, and operator/provider-resolution semantics.
 4. **Never trust teardown for durability** — the outbox is on disk at write time; `close()` is best-effort within 5s.
 5. **Never retry a permanent error indefinitely at short intervals** — permanent failures quarantine immediately; the periodic sweep is the only re-attempt path, on a 30-min cadence.
 
 ## Dependency and feeding downstream tickets
 
-- **Issue #5 (Hindsight semantics):** this contract assumes `document_id` replace is idempotent and that metadata round-trips. #5 must verify that against the pinned API.
+- **Issue #5 (Hindsight semantics):** this contract uses `document_id` replace as a revision/upsert primitive, not as an idempotency guarantee. Retry safety depends on this durable outbox, caller `operation_id`, and provider-supported status lookup; duplicate suppression and exact metadata wire fidelity remain live-evidence-gated. The metadata fidelity test is an explicit publish gate for this contract.
 - **Issue #7 (TTL/eviction/performance):** the outbox table grows with quarantined rows; #7 should define retention/compaction for terminal rows.
 - **Issue #6 (reconciliation/observability/operator recovery):** its lease/fence/CAS recovery contract explicitly supersedes §6's former blanket `in_flight` reset-to-`pending` rule. An unexpired lease remains owned; an expired lease is reclaimed only by fenced CAS, and an uncertain remote operation is status-reconciled before resubmission.
 - **A future implementation ticket** will build this against a disposable environment per the issue #2 isolation rules.
@@ -137,4 +144,4 @@ The operator surface reports:
 
 ## Concise recommendation for issue #4
 
-Atomic L1+outbox commit via ATTACH; separate WAL file per bank dir; five-total-attempt exponential backoff; append-only operation/transition history with lease/fence/CAS recovery; background drain thread + drain-on-restart; idempotency by `(document_id, mnemosyne_rev)` with multiple durable attempts; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via the Issue #6 automatic 30-minute path; and CLI replay only through Issue #6's authorized operator path. Queue-drained is separate from operationally healthy. Every decision confirmed with Jay during the grilling session.
+Atomic L1+outbox commit via ATTACH; separate WAL file per bank dir; five-total-attempt exponential backoff; append-only operation/transition history with lease/fence/CAS recovery; background drain thread + drain-on-restart; logical enqueue identity by `(document_id, mnemosyne_rev)` with multiple durable attempts; caller operation IDs and provider status lookup for retry safety; explicit durable `uncertain` recovery; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via the Issue #6 automatic 30-minute path; and CLI replay only through Issue #6's authorized operator path. Queue-drained is separate from operationally healthy, and metadata wire fidelity is an explicit publish gate. Every decision confirmed with Jay during the grilling session.

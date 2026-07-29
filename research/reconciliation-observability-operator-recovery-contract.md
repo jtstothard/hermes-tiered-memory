@@ -35,7 +35,7 @@ outbox
   mnemosyne_rev         NOT NULL
   content_snapshot      NOT NULL
   metadata_snapshot     NOT NULL
-  state                 NOT NULL             -- pending | in_flight | promoted | quarantined
+  state                 NOT NULL             -- pending | in_flight | uncertain | promoted | quarantined
   state_version         NOT NULL             -- increments on every state/lease/fence mutation
   owner_id, lease_id    nullable
   lease_expires_at      nullable
@@ -130,13 +130,18 @@ Each outbox row has a monotonically increasing `state_version`, an immutable tra
 pending --worker_claim(CAS)--> in_flight --worker_success(CAS + fence)--> promoted
 pending --worker_retry(CAS)--> pending
 in_flight --worker_retry(CAS)--> pending
+in_flight --remote_outcome_uncertain(CAS)--> uncertain
 in_flight --worker_terminal_failure(CAS)--> quarantined
+uncertain --status_success(CAS + fence)--> promoted
+uncertain --status_retryable_failure(CAS + fence)--> pending
+uncertain --status_permanent_failure(CAS + fence)--> quarantined
+uncertain --bounded_unknown(CAS)--> uncertain
 quarantined --automatic_reconciliation_retry(CAS)--> pending
 quarantined --authorized_operator_replay(CAS)--> pending
 promoted ----------------------------------------------> promoted
 ```
 
-`promoted` is terminal. `quarantined` is terminal for the current delivery-attempt cycle, not an immutable row. It remains excluded from ordinary draining until either `automatic_reconciliation_retry` or `authorized_operator_replay` explicitly moves it to `pending`; neither transition erases prior quarantine evidence. Automatic retry is the Issue #4 30-minute sweep and is performed by the reconciliation service without human authorization. Operator replay is a separate, authenticated, explicitly confirmed action and is never implied by a reconciliation run.
+`promoted` is terminal. `uncertain` is a durable non-terminal state for a possibly accepted remote operation whose outcome has not been established. It remains excluded from ordinary draining and blocks newer revisions until status reconciliation resolves it or an explicitly authorized provider/operator resolution establishes a safe next state. `quarantined` is terminal for the current delivery-attempt cycle, not an immutable row. It remains excluded from ordinary draining until either `automatic_reconciliation_retry` or `authorized_operator_replay` explicitly moves it to `pending`; neither transition erases prior quarantine evidence. Automatic retry is the Issue #4 30-minute sweep and is performed by the reconciliation service without human authorization. Operator replay is a separate, authenticated, explicitly confirmed action and is never implied by a reconciliation run.
 
 Every transition uses compare-and-set on the expected `state_version` and, for an owned row, the current fencing token. A failed CAS means another worker owns the newer state; the loser MUST abandon the local commit and emit a conflict event. Each transition records its transition name, actor (`worker`, `reconciliation_service`, or principal), run/action ID, expected and resulting state versions, and reason.
 
@@ -144,9 +149,9 @@ Every transition uses compare-and-set on the expected `state_version` and, for a
 
 An `in_flight` claim MUST persist `owner_id`, `lease_id`, `lease_expires_at`, and a monotonically increasing `fence` before the remote call. The worker renews the lease before expiry. On restart, recovery reclaims only rows whose lease is expired, using a CAS that increments `fence`; it MUST NOT reset every `in_flight` row to `pending`.
 
-V1 MUST call Hindsight `retain` in **async mode**. The caller MUST generate and persist an `operation_id` before sending, and MUST reuse it for the same logical `(document_id, mnemosyne_rev, operation_kind)` attempt after timeout, crash, or an uncertain response. The Issue #5 evidence says caller IDs make async retries idempotent, while `operation_id` is ignored for synchronous retain. Therefore `operation_id` alone MUST NOT be presented as protection for synchronous retain; synchronous retain is prohibited in v1.
+V1 MUST call Hindsight `retain` in **async mode**. The caller MUST generate and persist an `operation_id` before sending, and MUST reuse it for the same logical `(document_id, mnemosyne_rev, operation_kind)` attempt after timeout, crash, or an uncertain response. The Issue #5 source/docs describe caller IDs as the provider's async retry mechanism, but this report does not elevate that documentation to a duplicate-suppression proof: live provider behavior and status lookup are required. Hindsight `replace` is a revision/upsert primitive, not an idempotency guarantee, and `operation_id` is ignored for synchronous retain. Therefore `operation_id` alone MUST NOT be presented as protection for synchronous retain; synchronous retain is prohibited in v1.
 
-An async accepted response is not promotion proof by itself. The selected Hindsight client/provider MUST pass a capability gate before implementation: it must supply the exact status route, request/response schema, authentication/identity fields, polling interval and deadline, and mapping to `success`, `retryable_failure`, `permanent_failure`, `timeout`, and terminal `unknown`. No status API, route, or schema may be invented here. If the selected client cannot supply and test that contract, the integration is blocked. Until then, a missing, malformed, unavailable, or deadline-exceeded lookup is bounded `unknown`; it is not success and MUST NOT trigger resubmission. On a lost/uncertain response, status lookup MUST happen before a new submission, and no new submission is permitted after bounded `unknown` without an explicit operator/provider-resolution path that first establishes the prior outcome.
+An async accepted response is not promotion proof by itself. The selected Hindsight client/provider MUST pass a capability gate before implementation: it must supply the exact status route, request/response schema, authentication/identity fields, polling interval and deadline, and mapping to `success`, `retryable_failure`, `permanent_failure`, `timeout`, and unresolved `unknown`. No status API, route, or schema may be invented here. If the selected client cannot supply and test that contract, the integration is blocked. Until then, a missing, malformed, unavailable, or deadline-exceeded lookup is recorded on the outbox as durable `uncertain`; it is not success and MUST NOT trigger resubmission. The row remains non-terminal, excluded from ordinary drain, visible as degraded/alerted, and subject to a bounded next reconciliation deadline. On a lost/uncertain response, status lookup MUST happen before a new submission, and no new submission is permitted after bounded `unknown` without an explicit operator/provider-resolution path that first establishes the prior outcome. If that path cannot establish the prior outcome, it may safely quarantine the row as unresolved with all evidence retained; it MUST NOT silently drop it or treat it as promoted.
 
 ### 1.2.1 Attempt identity and per-document ordering
 
@@ -163,13 +168,13 @@ in_flight -> unknown -> uncertain
 uncertain -> status_success -> promoted
 uncertain -> status_retryable_failure -> retry_pending (new operation_id)
 uncertain -> status_permanent_failure -> quarantined
-uncertain -> status_timeout|status_unknown -> uncertain (no resubmission)
+uncertain -> status_timeout|status_unknown -> uncertain (durable non-terminal; alert/reconcile again, no resubmission)
 any non-terminal state -> newer_revision_waiting -> newer_revision_eligible only after the older operation is terminal
 ```
 
 The durable `document_ordering` row is the per-document serialization ledger. For every document, `ordering_version`, `eligible_revision`, `terminal_revision`, and `terminal_outcome` are updated under owner/fence/CAS; the ledger is never inferred from a scan of outbox rows. A coordinator claims it with `UPDATE ... WHERE document_id=? AND (owner_id IS NULL OR lease_expires_at <= :now OR owner_id=:me) AND fence=:expected_fence`, setting `owner_id`, `lease_id`, `lease_expires_at`, and (only on takeover) `fence=fence+1`; the claim and ordering mutation allocate one transition sequence transactionally. Renewal is `UPDATE ... WHERE document_id=? AND owner_id=:me AND lease_id=:lease AND fence=:fence AND lease_expires_at>:now`, extending the expiry without changing the fence. Takeover is permitted only by `... WHERE owner_id IS NOT NULL AND lease_expires_at<=:now AND fence=:old_fence`, and must increment the fence; a zero-row update is lease loss. Every submit/advance/terminal CAS MUST include `document_id`, `owner_id`, `lease_id`, `fence`, `ordering_version`, and `lease_expires_at>:now`. A revision is eligible only when it is the ledger's `eligible_revision` and the prior `terminal_revision` is recorded. Completion of an older revision and promotion of the next revision to `eligible_revision` MUST be one atomic transaction that increments `ordering_version`, records the terminal outcome, and appends the transition audit with one `transition_seq`. A stale coordinator that loses this CAS MUST abandon submission and emit an ordering conflict. The ledger fence is separate from the row fence, and both must be current for a submission.
 
-The record MUST retain every operation outcome and its evidence. A newer revision MUST wait behind an older `in_flight` or uncertain operation; it may proceed only after the older operation is confirmed terminal (success or failure) and the per-document ordering lease/CAS advances. Local promotion still requires the current row state/version and fence.
+The record MUST retain every operation outcome and its evidence. A newer revision MUST wait behind an older `in_flight` or uncertain operation; it may proceed only after the older operation is confirmed terminal (success or failure), or the older operation is safely quarantined by the explicit unresolved-outcome path, and the per-document ordering lease/CAS advances. Local promotion still requires the current row state/version and fence.
 
 The post-promotion path is explicit: when an older revision reaches `promoted`, the ordering coordinator atomically records the older revision as terminal, advances the per-document ordering version under CAS, and moves the next queued newer revision from `newer_revision_waiting` to `newer_revision_eligible` (or leaves it eligible if already pending). A worker may submit that newer revision only after observing that committed ordering advance and acquiring its own lease/fence. If the older revision terminates in failure, the same ordering advance occurs according to the configured failure policy; a newer revision MUST NOT be blocked forever merely because the older row is quarantined. A stale coordinator/worker that loses this CAS must not submit the newer revision.
 
@@ -198,7 +203,7 @@ A reconciliation run MUST inspect every non-archived outbox row and verify state
 
 The health surface MUST expose at least:
 
-- counts by `pending`, `in_flight`, `promoted`, and `quarantined`;
+- counts by `pending`, `in_flight`, `uncertain`, `promoted`, and `quarantined`;
 - oldest pending age and oldest quarantine age;
 - expired-lease and CAS-conflict counts;
 - unresolved remote-operation count and status-lookup failures;
@@ -206,10 +211,10 @@ The health surface MUST expose at least:
 - reconciliation run ID, start/end time, and status (`running`, `succeeded`, `failed`, `unknown`);
 - worker liveness: heartbeat time, worker count, and stale-worker count;
 - freshness age of the health snapshot;
-- `queue_drained = (pending == 0 and in_flight == 0)`;
-- `operationally_healthy = queue_drained and quarantined == 0 and unresolved_remote_operations == 0 and reconciliation_status == succeeded and worker_liveness == healthy`.
+- `queue_drained = (pending == 0 and in_flight == 0 and uncertain == 0)`;
+- `operationally_healthy = queue_drained and quarantined == 0 and uncertain == 0 and unresolved_remote_operations == 0 and reconciliation_status == succeeded and worker_liveness == healthy`.
 
-`queue_drained` deliberately does not hide quarantine. A quarantined row makes `operationally_healthy` false and produces a visible alert even when `queue_drained` is true. Missing or stale inputs produce `unknown`/`degraded`, never a clean result.
+`queue_drained` deliberately does not hide quarantine or uncertainty. A quarantined row makes `operationally_healthy` false and produces a visible alert even when `queue_drained` is true. An uncertain row also prevents `queue_drained`, remains unresolved until status/provider resolution or safe quarantine, and produces degraded/alert state. Missing or stale inputs produce `unknown`/`degraded`, never a clean result.
 
 ### 1.5 Compaction, reconciliation snapshots, and watermarks
 
@@ -300,7 +305,7 @@ The implementation evidence must include table-driven tests with representative 
 
 ## 6. Evidence and publish-readiness gates
 
-This report records requirements, not completed evidence. Publish readiness requires two distinct evidence classes:
+This report records requirements, not completed evidence. Publish readiness requires two distinct evidence classes. In addition, Issue #4's publish gate is explicit: the disposable live integration must verify exact metadata wire fidelity for the outbox's metadata through retain/replace/recall before this contract may be declared ready; pinned source/docs support is not sufficient.
 
 ### Deterministic local/CI evidence
 
@@ -338,10 +343,10 @@ The live spike measures drain latency, status-lookup/drift remote-call load, asy
 2. Remote operations for one document are ordered and uncertain async outcomes are status-reconciled before resubmission.
 3. Reconciliation and compaction never silently lose, delete, or overwrite evidence, including across snapshot/watermark races.
 4. Automatic reconciliation retry is the unauthorized 30-minute Issue #4 path; operator replay is separately authorized, bounded, and audited.
-5. Replay is per-item CAS-eligible, bounded, rate-limited, timeout-bounded, snapshotted, audited, and idempotent.
+5. Replay is per-item CAS-eligible, bounded, rate-limited, timeout-bounded, snapshotted, audited, and uses the same durable operation/status-resolution contract; no native replace idempotence is assumed.
 6. Deterministic drift checks report reproducible coverage, detection SLO status, and keyed metadata digests without content.
 7. Telemetry is allowlisted, bounded, HMAC-keyed, access-controlled, scrubbed, and cannot become a memory-content or credential exfiltration path.
-8. `queue_drained` never hides quarantine; stale or incomplete health is degraded/unknown, not clean.
+8. `queue_drained` never hides quarantine or uncertainty; stale or incomplete health is degraded/unknown, not clean.
 
 ## Explicit successor gates
 

@@ -10,6 +10,11 @@ required = {"L1 hit", "L2 miss/fallback + L2->L1 backfill", "synchronous L1 writ
             "profile/bank isolation", "one composite provider/tool namespace"}
 actual = set(e["contract_cases"])
 assert e["status"] == "PASS", e
+assert e["release_gate_status"] == "BLOCKED", e
+classification = e["evidence_classification"]
+assert classification["catalog_status"] == "NON_CATALOG", classification
+assert classification["boundary"] == "synthetic/fake-boundary", classification
+assert classification["release_gate_valid"] is False, classification
 assert e["test_exit_code"] == 0, e
 assert required <= actual, required - actual
 assert "stdlib fakes" in e["scope"] and "no live integration" in e["scope"]
