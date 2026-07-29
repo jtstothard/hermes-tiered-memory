@@ -63,9 +63,9 @@ Backoff schedule: **10s → 30s → 90s → 5m → 15m**. After 5 transient fail
 
 ### 6. Drain trigger — background thread + drain-on-restart replay
 
-- **`initialize()`** starts a dedicated background drain thread (daemon) and runs an immediate drain-on-restart replay (process any `pending`/`in_flight` rows left by a crash — `in_flight` rows from a torn process are reset to `pending` first).
+- **`initialize()`** starts a dedicated background drain thread (daemon) and runs an immediate drain-on-restart replay. For `in_flight` rows, the Issue #6 reconciliation/lease contract supersedes the former blanket-reset wording: recover only an expired lease by CAS, incrementing the fencing token; do not reset an unexpired lease or resubmit an uncertain remote operation.
 - **`close()`** stops the thread within the 5s teardown cap. The thread is daemon, so anything still running past the window dies with the interpreter.
-- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, updates to `promoted` or back to `pending` (with incremented `attempts` and `next_retry_at`) or `quarantined` (attempts exhausted or permanent failure). Sleeps when no work.
+- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, updates to `promoted` or back to `pending` (with incremented `attempts` and `next_retry_at`) or `quarantined` (attempts exhausted or permanent failure). Sleeps when no work. Lease expiry, fencing, and uncertain remote-operation recovery are governed by Issue #6; this section does not authorize a blind `in_flight` reset.
 
 ### 7. Idempotency key — `(document_id, mnemosyne_revision)`
 
@@ -105,6 +105,7 @@ The operator surface reports:
 
 - **Issue #5 (Hindsight semantics):** this contract assumes `document_id` replace is idempotent and that metadata round-trips. #5 must verify that against the pinned API.
 - **Issue #7 (TTL/eviction/performance):** the outbox table grows with quarantined rows; #7 should define retention/compaction for terminal rows.
+- **Issue #6 (reconciliation/observability/operator recovery):** its lease/fence/CAS recovery contract explicitly supersedes §6's former blanket `in_flight` reset-to-`pending` rule. An unexpired lease remains owned; an expired lease is reclaimed only by fenced CAS, and an uncertain remote operation is status-reconciled before resubmission.
 - **A future implementation ticket** will build this against a disposable environment per the issue #2 isolation rules.
 
 ## Newly visible successor questions
