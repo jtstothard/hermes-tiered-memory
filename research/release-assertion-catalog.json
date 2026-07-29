@@ -14,7 +14,7 @@
     {"id": "adapter-contract", "required": true, "assertions": ["adapter.contract_pass"]},
     {"id": "outbox-restart", "required": true, "assertions": ["outbox.restart_recovery"]},
     {"id": "health-cli", "required": true, "assertions": ["health.status_and_tools", "cli.exit_contract"]},
-    {"id": "rollback", "required": false, "required_from_release": 2, "first_release_exception": "uninstall-disable-recovery-only" , "assertions": ["rollback.restore_invariant"]},
+    {"id": "rollback", "required": false, "required_from_release": 2, "first_release_exception": "uninstall-disable-recovery-only", "assertions": ["rollback.restore_invariant"]},
     {"id": "artifact-authenticity", "required": true, "assertions": ["artifact.tag_verified", "artifact.attestation_verified"]},
     {"id": "package-content", "required": true, "assertions": ["package.file_list", "package.no_secrets"]}
   ],
@@ -22,22 +22,27 @@
     "dimensions": ["python", "platform", "artifact_variant"],
     "tuple_order": ["python", "platform", "artifact_variant"],
     "tuple_schema": {
-      "python": "exact interpreter version",
-      "platform": "declared OS-architecture tag",
-      "artifact_variant": ["wheel-install", "sdist-build-install"]
+      "type": "array",
+      "items": ["exact interpreter version", "declared OS-architecture tag", "wheel-install|sdist-build-install"]
     },
-    "cells_source": "release-manifest",
-    "cells": "explicit ordered list of applicable tuples",
-    "uniqueness": "each tuple appears exactly once; stable cell id is derived from the ordered tuple",
+    "cells": {
+      "state": "BLOCKED",
+      "source": "release-manifest.json#/compatibility/matrix/cells",
+      "encoding": "UTF-8 RFC 8785/JCS JSON array of arrays in tuple_order, no trailing newline",
+      "hash_algorithm": "SHA-256",
+      "digest": null,
+      "reason": "No release manifest or implementation exists; applicable matrix cells are not yet recorded."
+    },
+    "uniqueness": "each tuple appears exactly once; stable cell id is SHA-256 of the UTF-8 JCS tuple array [python, platform, artifact_variant]",
     "applicability": "include a tuple only when its artifact variant is declared applicable for that exact Python/platform pair; do not infer missing tuples by Cartesian expansion",
-    "cardinality": "count(matrix.cells)",
-    "evidence_rule": "each required gate has exactly one evidence object per listed cell; optional gates are BLOCKED or omitted only under the gate's omission rule",
-    "artifact_reuse": "an immutable artifact hash may occur in multiple cells, but each cell requires independent run-scoped evidence"
+    "cardinality": "count(the ordered tuple array at source)",
+    "evidence_rule": "each required gate has exactly one evidence object per listed cell; no evidence is valid while cells.state is BLOCKED; optional gates are BLOCKED or omitted only under the gate's omission rule",
+    "artifact_reuse": "an immutable artifact hash may occur in multiple explicitly listed cells, but each cell requires independent run-scoped evidence"
   },
   "id_rules": {
     "gate_order": "array order above is normative",
     "assertion_order": "assertions array order per gate is normative",
-    "matrix_cell_id": "manifest-derived digest of canonical tuple [python, platform, artifact_variant]",
+    "matrix_cell_id": "SHA-256 of UTF-8 RFC 8785/JCS encoding of the ordered tuple array [python, platform, artifact_variant], lowercase hex",
     "evidence_id": "unique per observation; never reused across gates, cells, or reruns"
   },
   "evidence_rules": {
@@ -45,8 +50,14 @@
     "blocked_requires": "non-empty blocker and no promotion to PASS",
     "observed_assertions": "exactly the expected assertion IDs, once each, in catalog order",
     "command_provenance": ["run_id", "cwd", "environment_hash", "config_hash", "input_hashes", "source_revision", "resolved_outputs", "redaction_map"],
+    "redaction_map": {
+      "encoding": "UTF-8 RFC 8785/JCS with the hash field omitted",
+      "hash_algorithm": "SHA-256",
+      "command_id": "SHA-256 of UTF-8 JCS object {argv: command.argv, tool_versions: command.tool_versions, redaction_map_sha256: command.redaction_map.hash}; command.argv is the canonical recorded/redacted argv and placeholders are bound by redaction_map entries",
+      "independent_validation": "reproducible without access to the unrevealed argv or any secret"
+    },
     "output_provenance": ["command_id", "run_id", "cwd", "environment_hash", "config_hash", "input_hashes", "source_revision", "resolved_path", "output_sha256"],
-    "redaction_map": "canonical entries plus policy/version metadata and SHA-256 hash; redaction never silently changes the assertion input",
-    "deterministic_reuse": "only immutable content-addressed outputs with matching complete provenance may be reused, and reuse_of must identify the original run and output"
+    "deterministic_reuse": "output reuse is forbidden unless reuse_of is present; reuse_of is the sole exception and must identify the original run/output and prove immutable content-addressed output plus exactly matching complete provenance",
+    "activation_assertion": "execute variables plugin_name and plugin_version from the verified manifest; reject each unless it is one safe path component matching [A-Za-z0-9][A-Za-z0-9._-]* and not . or ..; assert readlink(active) equals expected_rel and readlink -f(active) equals realpath -e(expected_rel), then import/register through active"
   }
 }

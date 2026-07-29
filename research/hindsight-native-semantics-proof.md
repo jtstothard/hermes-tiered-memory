@@ -12,7 +12,7 @@ This ticket verifies the assumptions made by #2 (live adapter contract) and #4 (
 
 ## Decision
 
-**The Hindsight API at v0.8.6 fully supports the composite provider's revision, deletion, metadata, and batch requirements.** Every assumption made in #2 and #4 is confirmed by source. The composite can use:
+**The pinned Hindsight v0.8.6 documentation and source support the stated revision, deletion, metadata, batch, and async-operation semantics.** This is source evidence only: no adapter or Hindsight server was exercised, and exact wire fidelity remains unverified where noted below. The composite may design against these semantics, but publish readiness still requires the disposable live integration evidence specified by #2/#4/#6.
 
 - **Revision:** `document_id` + `update_mode: "replace"` (default) — Hindsight upserts: deletes the prior document and all its memories, then re-processes. This is the revision primitive confirmed by #2 and relied on by #4's idempotency key `(document_id, mnemosyne_revision)`.
 - **Deletion:** `DocumentsApi.delete_document(bank_id, document_id)` — permanently removes the document and all associated memories.
@@ -51,7 +51,7 @@ From `retain.mdx` L110–112:
 
 Verified by `test_fact_extraction_metadata.py` — metadata key-value pairs appear in the LLM prompt. The engine stores metadata on memory units (`_write_retain_outcome_metadata`, `memory_engine.py` L2552).
 
-**Composite mapping (confirms #2):** carry Mnemosyne-only data in Hindsight metadata:
+**Composite mapping (supported by the pinned source/docs; wire fidelity unverified):** carry Mnemosyne-only data in Hindsight metadata:
 ```json
 {"origin": "mnemosyne", "profile": "<profile>", "bank": "<bank>", "mnemosyne_id": "<id>", "mnemosyne_revision": <int>}
 ```
@@ -112,4 +112,4 @@ From `retain.mdx` L153–159: tags control visibility — a memory is only retur
 
 ## Concise recommendation for issue #5
 
-The Hindsight v0.8.6 API fully supports the composite's needs: `document_id` replace is the revision primitive (idempotent upsert), `delete_document` is the deletion path (permanent), metadata round-trips through recall (wire-fidelity needs one live test), batch is per-item and non-atomic across sub-batches, and `operation_id` makes async retries safe. Use tags as a second isolation layer beyond bank names. The only unverified item is exact metadata fidelity through the full replace→recall→list→delete cycle, which the live spike must confirm.
+The pinned Hindsight v0.8.6 docs/source support the composite's intended semantics: `document_id` replace is the revision primitive (idempotent upsert), `delete_document` is the deletion path (permanent), metadata is documented and implemented as attached to memory units and returned on recall, batch is per-item and non-atomic across sub-batches, and `operation_id` is documented to make async retries safe. These are not wire-fidelity or live-integration proofs. Exact metadata fidelity through the full replace→recall→list→delete cycle, and the end-to-end behavior of the real adapter/client/server path, remain unverified and must be confirmed by the disposable live spike. Use tags as a second isolation layer beyond bank names only after that integration gate passes.
