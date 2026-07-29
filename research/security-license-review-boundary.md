@@ -1,11 +1,26 @@
 # Issue #9 research: pre-publish security and license review boundary
 
 Date: 2026-07-29  
-Repository evidence revision: `6b55b3674069d0cace51cbd414a5d8ed95f18aab` (the exact reviewed commit for this report). The earlier draft named `d762f28353ca6cb5ddd65bdf4a706842131226df`, and the still earlier `5a3b010`, are historical context only and are not the evidence revision for this report.
+Report revision: this file is being edited in the working tree and has no immutable report revision until it is committed. Do not use a later commit containing this file as evidence that its current text existed earlier.
+
+Local source baseline for the observations below: commit `d80a9b5e4749490db8047ddf9ea7fbfd95ebbfd5` of this repository. This is the immutable checkout baseline for local claims, not the revision of this report. At packaging/review time, record the checked-in commit and SHA-256 of this file separately.
 
 ## Scope and evidence policy
 
-This is a source-only decision artifact for the harden + publish successor. I inspected the repository at the evidence revision above, its prototype source/tests/configuration, and the pinned upstream source metadata. I did not start Hermes, connect to Hindsight, use credentials, read production data, change estate configuration, push to GitHub, create a commit, or close an issue. Local observations are therefore claims about that exact checkout, not about a moving branch or a later checkout.
+This is a source-only decision artifact for the harden + publish successor. I inspected the repository at the local source baseline above, its prototype source/tests/configuration, and the pinned upstream source metadata. I did not start Hermes, connect to Hindsight, use credentials, read production data, change estate configuration, push to GitHub, create a commit, or close an issue. Local observations are therefore claims about that exact checkout, not about a moving branch or a later checkout.
+
+### Claim-to-source-evidence binding
+
+The report revision and the evidence revisions are different things. Each claim must be interpreted against the source artifact named in this table; editing this report does not refresh, extend, or retroactively prove any source observation.
+
+| Claim family | Source/evidence artifact | Immutable source revision | Status and required action |
+|---|---|---|---|
+| Local prototype imports, tracked packaging files, `.gitignore`, and known publish-set paths | This repository's checked-in tree and named files | `d80a9b5e4749490db8047ddf9ea7fbfd95ebbfd5` | Baseline observation only. Re-check and bind the result to the exact checked-in commit and file SHA-256 at packaging/review time. |
+| Hermes license, Python bounds, and dependency declarations | Hermes Agent `LICENSE` and `pyproject.toml` | `3ef6bbd201263d354fd83ec55b3c306ded2eb72a` | Source identity is pinned; retain fetched bytes, retrieval metadata, and hashes before release. |
+| Mnemosyne license, Python metadata, and `PyYAML` declaration | Mnemosyne `LICENSE` and `pyproject.toml` | `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce` | Source identity is pinned; retain fetched bytes, retrieval metadata, and hashes before release. |
+| Hindsight root license and workspace context | Hindsight `LICENSE` and repository metadata | `08995e3013858e705fb4ca27c0ade3a286ef4750` | Source identity is pinned; the selected client and transitive tree remain unresolved until separately locked and inventoried. |
+
+The table is a mapping of claims to source inputs, not a claim that the current report text was present at any of those revisions. A future edit must update the mapping if it changes a cited source, claim scope, or local baseline.
 
 ### Publish set and hygiene boundary
 
@@ -22,9 +37,9 @@ The repository currently contains a fake/stdlib prototype and an acceptance harn
 
 Primary source pins and inspected local evidence:
 
-- Hermes Agent `v2026.7.20`, commit [`3ef6bbd`](https://github.com/NousResearch/hermes-agent/tree/3ef6bbd201263d354fd83ec55b3c306ded2eb72a); its upstream `LICENSE` is MIT and its `pyproject.toml` contains ranged/conditional dependency declarations. The successor must resolve the selected environment to a lockfile with hashes; the source pin alone is not a dependency lock.
-- Mnemosyne `v3.14.0`, peeled commit [`4e5ed14`](https://github.com/mnemosyne-oss/mnemosyne/tree/4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce); its upstream `LICENSE` and `pyproject.toml` identify MIT licensing and `PyYAML>=6.0`.
-- Hindsight `v0.8.6`, commit [`08995e3`](https://github.com/vectorize-io/hindsight/tree/08995e3013858e705fb4ca27c0ade3a286ef4750); its upstream `LICENSE` is MIT. Its repository is a workspace, so the exact client package and its transitive runtime tree must be resolved by the successor rather than inferred from the root file.
+- Hermes Agent `v2026.7.20`, commit [`3ef6bbd201263d354fd83ec55b3c306ded2eb72a`](https://github.com/NousResearch/hermes-agent/tree/3ef6bbd201263d354fd83ec55b3c306ded2eb72a); its upstream `LICENSE` is MIT and its `pyproject.toml` contains ranged/conditional dependency declarations. The successor must resolve the selected environment to a lockfile with hashes; the source pin alone is not a dependency lock.
+- Mnemosyne `v3.14.0`, peeled commit [`4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce`](https://github.com/mnemosyne-oss/mnemosyne/tree/4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce); its upstream `LICENSE` and `pyproject.toml` identify MIT licensing and `PyYAML>=6.0`.
+- Hindsight `v0.8.6`, commit [`08995e3013858e705fb4ca27c0ade3a286ef4750`](https://github.com/vectorize-io/hindsight/tree/08995e3013858e705fb4ca27c0ade3a286ef4750); its upstream `LICENSE` is MIT. Its repository is a workspace, so the exact client package and its transitive runtime tree must be resolved by the successor rather than inferred from the root file.
 - Local architecture and known gaps: [`map.md`](../map.md), [`issues/07-hermes-integration-config.md`](../issues/07-hermes-integration-config.md), [`prototype-acceptance-handoff/ADR.md`](../prototype-acceptance-handoff/ADR.md), and the prior adapter/outbox reports in this directory.
 
 ## Decision
@@ -52,9 +67,9 @@ A batched import inspection of every tracked Python file found only Python stand
 
 The architecture says the composite calls both APIs and bundles neither. The practical inventory to resolve once implementation starts is:
 
-1. **Hermes Agent** `v2026.7.20` / `3ef6bbd`: plugin loader and `MemoryProvider` contract. The pinned upstream `pyproject.toml` declares Python `>=3.11,<3.14` and ranged/conditional dependencies; the composite must resolve those dependencies for each supported Python/platform matrix into its own successor lockfile rather than silently inheriting a different Hermes environment.
-2. **Mnemosyne** `v3.14.0` / `4e5ed14`: runtime package declares `PyYAML>=6.0`; SQLite is Python's standard-library `sqlite3`/the platform SQLite implementation unless the final adapter adds another package. Verify the actual installed tree, because an upstream range is not a release lock.
-3. **Hindsight** `v0.8.6` / `08995e3`: use the selected generated Python client/API package, or an explicitly reviewed HTTP client. The root is a multi-package uv workspace; the successor must record which workspace package is used and its resolved dependencies. Do not assume that the full Hindsight server stack is a client dependency.
+1. **Hermes Agent** `v2026.7.20` / `3ef6bbd201263d354fd83ec55b3c306ded2eb72a`: plugin loader and `MemoryProvider` contract. The pinned upstream `pyproject.toml` declares Python `>=3.11,<3.14` and ranged/conditional dependencies; the composite must resolve those dependencies for each supported Python/platform matrix into its own successor lockfile rather than silently inheriting a different Hermes environment.
+2. **Mnemosyne** `v3.14.0` / `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce`: runtime package declares `PyYAML>=6.0`; SQLite is Python's standard-library `sqlite3`/the platform SQLite implementation unless the final adapter adds another package. Verify the actual installed tree, because an upstream range is not a release lock.
+3. **Hindsight** `v0.8.6` / `08995e3013858e705fb4ca27c0ade3a286ef4750`: use the selected generated Python client/API package, or an explicitly reviewed HTTP client. The root is a multi-package uv workspace; the successor must record which workspace package is used and its resolved dependencies. Do not assume that the full Hindsight server stack is a client dependency.
 4. **Composite-owned code:** durable SQLite outbox, HTTP/TLS adapter, retry/backoff, metadata and profile/bank mapping, package entry point, config validation, and tests. Any choice of `httpx`, `requests`, `hindsight-client`, serialization, or crypto package becomes a direct dependency and must be listed and pinned; none is present in the current checkout.
 5. **Build/test tools:** `build`/wheel backend, test runner, Ruff, Bandit, Semgrep, `pip-audit`, SBOM generator, license inventory, Gitleaks/TruffleHog, and artifact verifier. These are CI/tooling dependencies, not automatically package runtime dependencies; pin their versions separately and record `tool --version` output.
 

@@ -2,11 +2,12 @@
 
 Date: 2026-07-29
 Repository: `jtstothard/hermes-tiered-memory`
-Evidence revision: `6b55b3674069d0cace51cbd414a5d8ed95f18aab`.
+Report revision: this file is being edited in the working tree and has no immutable report revision until it is committed. Do not use a later commit containing this file as evidence that its current text existed earlier.
+Local source baseline for local observations: commit `d80a9b5e4749490db8047ddf9ea7fbfd95ebbfd5`. This identifies the inspected checkout, not the report revision. At packaging/review time, record this file's exact checked-in commit and SHA-256 separately.
 
 ## Immutable source provenance
 
-The source observations below are bound to these exact upstream commits; short SHAs are not used as evidence:
+The source observations below are bound to these exact upstream commits. The upstream source revision, the local repository baseline, and this report's future revision are separate provenance fields; none may be substituted for another.
 
 | Source | Version/ref | Full commit SHA | Retrieval URL | Retrieval/verification metadata | Source/artifact hash record |
 |---|---|---|---|---|---|

@@ -16,7 +16,7 @@ Primary sources used:
 
 ## Recommendation up front
 
-Implement issue #2 as a single Hermes memory-provider plugin that owns both adapters and exposes one provider/tool namespace. Keep Mnemosyne local and synchronous; enqueue Hindsight promotion behind a durable local outbox. Use Hindsight `document_id` as the revision/idempotency primitive, not an invented fact-level update API. Do not claim the contract is complete until a matrix of pinned-source tests passes in a temporary Hermes home against a disposable Hindsight server/database. The live integration is currently **unverified**.
+Implement issue #2 as a single Hermes memory-provider plugin that owns both adapters and exposes one provider/tool namespace. Keep Mnemosyne local and synchronous; enqueue Hindsight promotion behind a durable local outbox. Use Hindsight `document_id` as the stable revision/upsert identity, not as an idempotency guarantee or an invented fact-level update API. Logical enqueue deduplication must be paired with a durable outbox, caller-supplied `operation_id`, provider status lookup, and a live-evidence gate before any retry-safety claim. Do not claim the contract is complete until a matrix of pinned-source tests passes in a temporary Hermes home against a disposable Hindsight server/database. The live integration is currently **unverified**.
 
 ## Pinned versions
 
@@ -79,7 +79,7 @@ Hindsight's pinned docs and generated client are the authority, not assumptions 
 
 ### Retain and batch
 
-The retain docs at [`hindsight-docs/docs/developer/api/retain.mdx`](https://github.com/vectorize-io/hindsight/blob/08995e3013858e705fb4ca27c0ade3a286ef4750/hindsight-docs/docs/developer/api/retain.mdx) specify item content plus `timestamp`, `context`, `metadata`, `document_id`, `update_mode`, entities, and tags. A caller-supplied `document_id` makes retain idempotent: default `replace` deletes the prior document and associated memories before processing the new content; `append` concatenates and reprocesses. Metadata is stored on memory units and returned with recall according to the docs.
+The retain docs at [`hindsight-docs/docs/developer/api/retain.mdx`](https://github.com/vectorize-io/hindsight/blob/08995e3013858e705fb4ca27c0ade3a286ef4750/hindsight-docs/docs/developer/api/retain.mdx) specify item content plus `timestamp`, `context`, `metadata`, `document_id`, `update_mode`, entities, and tags. A caller-supplied `document_id` selects the document for replacement: default `replace` deletes the prior document and associated memories before processing the new content; `append` concatenates and reprocesses. That replacement behavior is not, by itself, an idempotency guarantee. Retry safety requires logical enqueue deduplication plus the durable outbox, a persisted caller `operation_id`, provider-supported status lookup, and live evidence that the selected provider honors the required semantics. Metadata is stored on memory units and returned with recall according to the docs.
 
 The generated Python client and OpenAPI definition are in [`hindsight-clients/python/hindsight_client_api/api/memory_api.py`](https://github.com/vectorize-io/hindsight/blob/08995e3013858e705fb4ca27c0ade3a286ef4750/hindsight-clients/python/hindsight_client_api/api/memory_api.py) and [`hindsight-clients/go/api/openapi.yaml`](https://github.com/vectorize-io/hindsight/blob/08995e3013858e705fb4a27c0ade3a286ef4750/hindsight-clients/go/api/openapi.yaml). The source has synchronous and async retain paths and tests for async batch retain (`tests/test_async_batch_retain.py`). Exact route spelling and response schema must be generated from this pinned OpenAPI at test setup, not hand-copied.
 
@@ -135,14 +135,14 @@ Fixtures should be deterministic and contain no personal or estate data:
 - `m-004`: deletion target.
 - 20-item batch with two deliberately invalid items; proves partial handling.
 - oversized synthetic content; proves 413/validation/retry behavior without real data.
-- repeated identical retain; proves idempotency.
+- repeated identical logical enqueue; proves local deduplication, while durable operation-ID reuse, provider status lookup, and live evidence test remote retry safety.
 
 Required cases:
 
 1. Hermes discovers exactly one composite provider and exactly one memory tool namespace.
 2. L1 hit avoids Hindsight; L1 miss queries Hindsight and backfills L1.
 3. L1 write survives Hindsight timeout/refusal.
-4. Same source ID/revision replay is a no-op or safe replacement.
+4. Same source ID/revision is logically deduplicated; replay safety is proven only through the durable outbox, caller operation ID, provider status lookup, and live-evidence gate.
 5. Revision 2 replaces only the owning Hindsight document.
 6. Delete removes/tombstones only the owning document and remains correct after restart.
 7. Alpha cannot recall beta; bank names and metadata agree.

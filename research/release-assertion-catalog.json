@@ -4,7 +4,7 @@
   "version": 1,
   "status": "contract-only",
   "release_context": {
-    "release_version": null,
+    "release_version": 1,
     "required_from_release": 2,
     "omission_allowed_before_release": true,
     "omission_reason": "The first release has no prior release artifact to restore; it may only prove human-approved uninstall/disable recovery to the prior non-plugin configuration.",
@@ -32,6 +32,7 @@
     {"id": "outbox-restart", "required": true, "assertions": ["outbox.restart_recovery"]},
     {"id": "health-cli", "required": true, "assertions": ["health.status_and_tools", "cli.exit_contract"]},
     {"id": "rollback", "required": false, "required_from_release": 2, "omission_allowed_before_release": true, "omission_reason": "No previous release artifact exists for release 1; only uninstall/disable recovery may be validated.", "assertions": ["rollback.restore_invariant"]},
+    {"id": "uninstall-disable-recovery", "required": true, "required_from_release": 1, "omission_allowed_before_release": false, "omission_reason": "A first release must prove recovery to the prior non-plugin Hermes configuration by uninstalling or disabling the plugin.", "assertions": ["recovery.uninstall_disable_restores_prior_configuration"]},
     {"id": "artifact-authenticity", "required": true, "assertions": ["artifact.tag_verified", "artifact.attestation_verified"]},
     {"id": "package-content", "required": true, "assertions": ["package.file_list", "package.no_secrets"]}
   ],

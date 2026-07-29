@@ -4,14 +4,22 @@
   "release_gate_status": "BLOCKED",
   "evidence_classification": {
     "catalog_status": "NON_CATALOG",
-    "boundary": "synthetic/fake-boundary",
+    "boundary": "FAKE_BOUNDARY",
     "release_gate_valid": false,
     "reason": "Prototype tests use stdlib fakes and a local file-backed outbox; they do not exercise the pinned real Hermes loader, a release artifact, a declared matrix cell, or release-gate provenance."
   },
   "test_exit_code": 0,
   "test_command": "python3 -m unittest discover -s tests -v",
+  "test_cwd": ".",
   "test_stdout": "",
   "test_stderr": "test_bounded_retry_quarantine_and_replay (test_acceptance.AcceptanceContractTests.test_bounded_retry_quarantine_and_replay) ... ok\ntest_changed_payload_revision_tombstones_old_and_delete_tombstone (test_acceptance.AcceptanceContractTests.test_changed_payload_revision_tombstones_old_and_delete_tombstone) ... ok\ntest_composite_single_provider_and_namespace (test_acceptance.AcceptanceContractTests.test_composite_single_provider_and_namespace) ... ok\ntest_deterministic_identity_and_replay_idempotency (test_acceptance.AcceptanceContractTests.test_deterministic_identity_and_replay_idempotency) ... ok\ntest_disconfirming_outage_on_cold_miss_returns_none_without_cross_talk (test_acceptance.AcceptanceContractTests.test_disconfirming_outage_on_cold_miss_returns_none_without_cross_talk) ... ok\ntest_l1_hit_skips_l2 (test_acceptance.AcceptanceContractTests.test_l1_hit_skips_l2) ... ok\ntest_l2_miss_fallback_backfills_l1 (test_acceptance.AcceptanceContractTests.test_l2_miss_fallback_backfills_l1) ... ok\ntest_l2_outage_stale_while_revalidate_and_foreground_survives (test_acceptance.AcceptanceContractTests.test_l2_outage_stale_while_revalidate_and_foreground_survives) ... ok\ntest_metadata_provenance_envelope (test_acceptance.AcceptanceContractTests.test_metadata_provenance_envelope) ... ok\ntest_profile_and_bank_isolation (test_acceptance.AcceptanceContractTests.test_profile_and_bank_isolation) ... ok\ntest_sync_l1_then_durable_enqueue_then_promotion_and_reconciliation (test_acceptance.AcceptanceContractTests.test_sync_l1_then_durable_enqueue_then_promotion_and_reconciliation) ... ok\n\n----------------------------------------------------------------------\nRan 11 tests in 0.004s\n\nOK\n",
+  "test_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "test_stderr_sha256": "9d5dd4915c81133fffb94196529f5a2d07540df95efb51060fbf70802ed745dd",
+  "source_files": {
+    "acceptance_harness.py": "f26ee28b5c13b0f889f249bb612839837d8c0f593547e64b6f06f58b398c9a65",
+    "tests/test_acceptance.py": "d5f0d4c6de2ee2a199c5160eebaeda91559a038219d4329bda52bc252a881261"
+  },
+  "source_manifest_sha256": "270e82f13bf003aafcdf0e9f077922303cca68152cdd2a717f37e0e9a126f4ea",
   "contract_cases": [
     "L1 hit",
     "L2 miss/fallback + L2->L1 backfill",
