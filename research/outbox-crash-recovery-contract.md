@@ -35,8 +35,14 @@ outbox
   metadata        TEXT    NOT NULL          -- JSON: profile, bank, origin, provenance
   status          TEXT    NOT NULL DEFAULT 'pending'
                   -- pending | in_flight | promoted | quarantined
-  attempts        INTEGER NOT NULL DEFAULT 0
+  attempt_no      INTEGER NOT NULL DEFAULT 0 -- 1..5 in the current worker cycle
+  retry_cycle_no  INTEGER NOT NULL DEFAULT 0 -- increments for each quarantine retry path
   next_retry_at   INTEGER                   -- epoch seconds; NULL when promoted/quarantined
+  state_version   INTEGER NOT NULL DEFAULT 0
+  owner_id        TEXT
+  lease_id        TEXT
+  lease_expires_at INTEGER
+  fence           INTEGER NOT NULL DEFAULT 0
   last_error      TEXT
   last_http_status INTEGER
   created_at      INTEGER NOT NULL
@@ -45,6 +51,8 @@ outbox
 UNIQUE(document_id, mnemosyne_rev)          -- idempotency constraint
 INDEX(status, next_retry_at)                -- drain worker query
 ```
+
+The `UNIQUE(document_id, mnemosyne_rev)` constraint deduplicates only the logical enqueue; it does not represent an attempt and MUST NOT block multiple attempts. Issue #6's durable `operation_attempt` table is append-only and contains `attempt_id`, `outbox_id`, `(document_id, mnemosyne_rev, operation_kind)`, opaque provider `operation_id`, `attempt_no`, status, request/outcome timestamps, bounded error classification, and provider status reference. `transition_audit` records every CAS transition. The source L1 write, outbox row creation/upsert, and initial audit are one ATTACH transaction; lease/fence claim, operation-ID persistence, and `in_flight` transition are durable before remote send; outcome and local transition/audit commit atomically with expected `state_version` and fence. This is the complete durable contract; the mutable `attempt_no` is only a materialized current-cycle counter, not the attempt history.
 
 ### 4. Transient vs permanent failure classification
 
@@ -57,15 +65,15 @@ INDEX(status, next_retry_at)                -- drain worker query
 | Malformed success payload | permanent | quarantine |
 | Async-accepted-then-failed | transient | retry (re-enqueue) |
 
-### 5. Retry budget — 5 retries, exponential backoff (~20 min total)
+### 5. Retry budget — 5 attempts per worker cycle, exponential backoff
 
-Backoff schedule: **10s → 30s → 90s → 5m → 15m**. After 5 transient failures, the row is reclassified `quarantined` with the final error recorded. Enough to ride out a Hindsight restart or transient network blip; bounded enough that a genuinely permanent failure is quarantined within ~20 minutes.
+The budget is **five total remote attempts**, numbered `attempt_no=1..5`, not five retries after an initial attempt. `retry_count = max(attempt_no-1, 0)`; after attempt 1, 2, 3, or 4 fails transiently, the next attempt is scheduled after **10s → 30s → 90s → 5m**, respectively. A transient failure on attempt 5 quarantines the row and records the final outcome; no sixth attempt is implied. Permanent failure quarantines immediately. A 429 Retry-After may delay the next scheduled attempt but may not extend the five-attempt budget. The counter resets to zero only when a quarantine retry path explicitly starts a new worker cycle, and `retry_cycle_no` records that boundary. All audit events, metrics, backoff oracles, and Issue #6 reconciliation rules use these same names and values.
 
 ### 6. Drain trigger — background thread + drain-on-restart replay
 
 - **`initialize()`** starts a dedicated background drain thread (daemon) and runs an immediate drain-on-restart replay. For `in_flight` rows, the Issue #6 reconciliation/lease contract supersedes the former blanket-reset wording: recover only an expired lease by CAS, incrementing the fencing token; do not reset an unexpired lease or resubmit an uncertain remote operation.
 - **`close()`** stops the thread within the 5s teardown cap. The thread is daemon, so anything still running past the window dies with the interpreter.
-- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, updates to `promoted` or back to `pending` (with incremented `attempts` and `next_retry_at`) or `quarantined` (attempts exhausted or permanent failure). Sleeps when no work. Lease expiry, fencing, and uncertain remote-operation recovery are governed by Issue #6; this section does not authorize a blind `in_flight` reset.
+- The drain thread loops: selects rows `WHERE status='pending' AND (next_retry_at IS NULL OR next_retry_at <= now) ORDER BY id LIMIT batch`, marks them `in_flight`, attempts promotion, and updates to `promoted` or back to `pending` (with incremented `attempt_no` and `next_retry_at`) or `quarantined` (attempts exhausted or permanent failure). Sleeps when no work. Lease expiry, fencing, and uncertain remote-operation recovery are governed by Issue #6; this section does not authorize a blind `in_flight` reset.
 
 ### 7. Idempotency key — `(document_id, mnemosyne_revision)`
 
@@ -75,18 +83,18 @@ Backoff schedule: **10s → 30s → 90s → 5m → 15m**. After 5 transient fail
 
 ### 8. Permanent failure — quarantine, halt only that document, leave L1 intact
 
-A `quarantined` row records `last_error`, `last_http_status`, and `attempts`. The drain continues processing other documents — a permanent failure on one record never blocks the queue. The L1 (Mnemosyne) entry that produced the quarantined promotion **remains valid** — the memory is stored at L1; only L2 promotion is blocked pending reconciliation.
+A `quarantined` row records `last_error`, `last_http_status`, and `attempt_no=5` (or the terminal-failure attempt number), plus its `retry_cycle_no`. The drain continues processing other documents — a permanent failure on one record never blocks the queue. The L1 (Mnemosyne) entry that produced the quarantined promotion **remains valid** — the memory is stored at L1; only L2 promotion is blocked pending reconciliation.
 
 ### 9. Reconciliation — periodic sweep (30 min) + CLI command
 
-- **Periodic sweep:** the drain thread re-attempts `quarantined` rows on a 30-minute cadence (longer than the retry backoff) so transient-then-fixed failures self-heal. A row that fails the sweep resets to `pending` with a fresh attempt counter and re-enters the normal retry cycle; if it fails all 5 again, it returns to `quarantined`.
-- **CLI command** (`hermes <provider> reconcile` or equivalent): manual, logged retry with visible output, for cases where an operator fixed something specific and wants immediate confirmation. Reports promoted/quarantined/still-failing counts.
+- **Periodic sweep:** the drain thread/reconciliation service re-attempts `quarantined` rows on a 30-minute cadence (longer than the retry backoff) so transient-then-fixed failures self-heal. It performs the Issue #6 `automatic_reconciliation_retry` CAS transition, increments `retry_cycle_no`, resets `attempt_no` to zero, and re-enters the five-total-attempt worker cycle; if it fails all five again, it returns to `quarantined` with a new state version and linked warning lineage.
+- **CLI command** (`hermes <provider> reconcile` or equivalent): this is only the Issue #6 `authorized_operator_replay` interface, never a third retry path. It MUST use authenticated replay authorization, default dry-run, explicit mutation confirmation, immutable target snapshot/hash, per-item state/revision/fence CAS, async operation-ID/status lookup, the same five-total-attempt budget and ordering rules, bounded target/rate/time/concurrency limits, deterministic skip reasons, and durable audit/alert semantics defined by Issue #6 §1.3 and §4. It reports promoted/quarantined/still-failing/skipped/rate-limited counts. An unauthorized or unconfirmed CLI request changes no row state.
 
-The periodic sweep means a genuinely-permanent-permanent row is retried every 30 min indefinitely — this is **accepted** as the cost of self-healing. The sweep is quiet (no alert) unless a row crosses a high attempt-count threshold (configurable; default 10 sweep cycles = ~5 hours), at which point it surfaces as a persistent-failure alert.
+The periodic sweep means a genuinely-permanent-permanent row is retried every 30 min indefinitely — this is **accepted** as the cost of self-healing. The sweep is quiet (no alert) unless a row crosses a high **sweep-cycle** threshold (configurable; default 10 sweep cycles = ~5 hours), at which point it surfaces as a persistent-failure alert.
 
-### 10. Checkpoint / drained semantics — all rows terminal
+### 10. Checkpoint / queue-drained semantics
 
-**Drained = every row is terminal (`promoted` OR `quarantined`).** A `quarantined` row has reached a final state and is not pending/retrying. The health-check signal is: `pending` count == 0 AND `in_flight` count == 0.
+**Queue drained = no row is currently `pending` or `in_flight`**, i.e. `pending == 0 AND in_flight == 0`; this does not mean every row is healthy. `quarantined` is terminal only for the current delivery-attempt cycle and remains an active recovery condition under Issue #6. The health surface MUST therefore report queue-drained separately from operational health, and must not describe a quarantined queue as “all rows terminal” without that qualification.
 
 The operator surface reports:
 - `drained: true/false` (no pending/in-flight rows)
@@ -117,4 +125,4 @@ The operator surface reports:
 
 ## Concise recommendation for issue #4
 
-Atomic L1+outbox commit via ATTACH; separate WAL file per bank dir; 5-retry exponential backoff over ~20 min; background drain thread + drain-on-restart; idempotency by `(document_id, mnemosyne_rev)`; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via 30-min periodic sweep + manual CLI; drained = all rows terminal. Every decision confirmed with Jay during the grilling session.
+Atomic L1+outbox commit via ATTACH; separate WAL file per bank dir; five-total-attempt exponential backoff; append-only operation/transition history with lease/fence/CAS recovery; background drain thread + drain-on-restart; idempotency by `(document_id, mnemosyne_rev)` with multiple durable attempts; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via the Issue #6 automatic 30-minute path; and CLI replay only through Issue #6's authorized operator path. Queue-drained is separate from operationally healthy. Every decision confirmed with Jay during the grilling session.
