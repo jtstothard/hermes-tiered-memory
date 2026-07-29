@@ -5,125 +5,184 @@ Repository: `jtstothard/hermes-tiered-memory`
 
 ## Scope and evidence policy
 
-This is a HITL `wayfinder:grilling` resolution. The decisions below were explicitly selected by Jay. No production service, estate data, or credentials were used. This defines the v1 packaging contract; implementation and CI evidence remain follow-on work.
+This is a HITL decision report, not an implementation or a release record. No production service, estate data, credentials, GitHub release, package publication, or Hermes process was used. The contract below is intentionally conditional: a release is not publish-ready merely because this document exists. A claim is a **PASS** only when the named artifact contains the observed result, command/tool version, source revision, interpreter/platform, and relevant hashes. `TBD`, `not run`, or “works locally” is not a pass.
 
-This ticket incorporates:
-- Issue #3 — the composite must load as exactly one Hermes memory provider.
-- Issue #6 — publish evidence must include deterministic health/CLI and content-free operational surfaces.
-- Issue #7 — pinned, measured compatibility and performance assumptions.
-- Issue #9 — reproducible release, SBOM, lockfile, license, secret, and artifact-integrity requirements.
+The contract incorporates the decisions and boundaries from issues #3, #6, #7, and #9, including the pinned Hermes loader behavior inspected in [`research/plugin-lifecycle-one-provider-proof.md`](plugin-lifecycle-one-provider-proof.md).
 
 ## Decision
 
-Version 1 will ship as a **private GitHub release containing an installable pinned wheel and source distribution**. PyPI publication is deferred. Installation and upgrades are explicit, pinned, and restart-based; unsupported environments fail closed rather than continuing on a best-effort basis.
+Version 1 targets a **private GitHub release** containing a pinned wheel and sdist. PyPI is deferred. The distribution artifact is not itself a Hermes plugin discovery artifact: the install/bootstrap procedure must explicitly place the plugin directory under the selected profile's `$HERMES_HOME/plugins/<name>/`, then configure `memory.provider` to that name. Updates are staged and restart-based. Unsupported environments, identity mismatches, incomplete verification, and duplicate-provider conditions fail closed before memory operation.
 
-## 1. Distribution target
+Python 3.11, 3.12, and 3.13 are **conditional support claims**, not current evidence. Each interpreter must pass every mandatory release gate on the declared CI platform(s), with the exact pinned dependency resolution. If any one is not tested and passing, the release must narrow its metadata and release notes to the passing range; it must not claim 3.11–3.13 support.
 
-- Canonical source remains the private GitHub repository.
-- Each candidate release is a protected, signed tag with a private GitHub release.
-- The release contains a wheel and sdist, checksums, SBOM, lockfile/export, compatibility metadata, and installation evidence.
-- PyPI and other public package indexes are out of v1 scope. Enabling public publication is a later decision and also crosses the security review trigger defined by issue #9.
+## 1. Names and unresolved release inputs
 
-## 2. Install and update path
+The following values are deliberately not invented by this report. They are release blockers until recorded in `release-manifest.json` (or an equivalent signed manifest):
 
-### Install
+- final Python distribution/project name;
+- Hermes plugin directory name (`<name>`), which must be the value configured as `memory.provider`;
+- build backend and its exact version;
+- lockfile/resolution tool and exact version;
+- selected Hindsight client/workspace package and exact version/commit, including its transitive runtime tree;
+- supported OS/architecture tags and whether the sdist is expected to build on each;
+- private GitHub repository/release policy, artifact signing identity, and verification key distribution;
+- migration policy and the first release's data/config schema version.
 
-Install the release wheel into an isolated environment using the published checksum and lockfile. The installation must not require a live Hermes home, production configuration, network access at import time, or credentials.
+The pinned upstream compatibility inputs already selected are:
 
-The package must expose the documented Hermes plugin entry point and register exactly one composite provider. A fresh-environment install/import test is mandatory for every release.
+- Hermes Agent `v2026.7.20`, commit `3ef6bbd201263d354fd83ec55b3c306ded2eb72a`;
+- Mnemosyne `v3.14.0`, commit `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce`;
+- Hindsight `v0.8.6`, commit `08995e3`; this does **not** identify the Python client package.
 
-### Update
+No artifact may use `latest`, an unrecorded workspace member, or an unhashable floating dependency. Resolving the Hindsight client and final package names is a prerequisite, not a documentation detail.
 
-Update by installing the replacement pinned wheel into the controlled environment, then restarting Hermes. Do not mutate a running provider in place. The release record must identify the old and new versions, upstream pins, migration/configuration notes, and the restart verification result.
+## 2. Exact install and Hermes discovery contract
 
-Rollback is the inverse: reinstall the previous verified wheel and restart. Rollback rehearsal belongs to issue #10, but the package must preserve version-identifiable artifacts so that rehearsal is deterministic.
+### 2.1 Required artifact layout
 
-## 3. Compatibility matrix
+The wheel must contain the plugin source under a deterministic, declared package subdirectory and expose the selected distribution metadata. The wheel's `RECORD` and file-list evidence must identify the files that bootstrap copies into the Hermes plugin directory. The sdist must contain the same plugin source and build metadata; it must not contain local databases, logs, `.env` files, credentials, real memory fixtures, or machine-specific paths.
 
-The initial supported Python range is **3.11–3.13**, constrained by the pinned Hermes support boundary. The release matrix must test each supported interpreter against the pinned versions:
+A wheel installed into an arbitrary virtual environment is **not sufficient** for discovery. On the pinned Hermes loader, discovery checks the bundled plugin directory and then `$HERMES_HOME/plugins/<name>/`; it loads that directory and selects it from `memory.provider`. The release procedure therefore has two distinct steps:
 
-- Hermes Agent `v2026.7.20` / commit `3ef6bbd`;
-- Mnemosyne `v3.14.0` / commit `4e5ed14`;
-- Hindsight `v0.8.6` / commit `08995e3`.
+1. **Dependency install:** install the exact wheel into the controlled Hermes Python environment using the release lock/export and artifact hashes, with no import-time network access or credentials.
+2. **Plugin bootstrap:** copy or extract only the verified plugin directory from that wheel into the target profile's `$HERMES_HOME/plugins/<name>/` using a versioned staging directory. The bootstrap must reject path traversal, unexpected files, and an existing directory whose manifest/version does not match. It must never copy a wheel blindly over an active directory.
 
-Floating `latest` dependencies are not supported. A dependency or upstream version change requires a new compatibility run and release record.
+The bootstrap records: profile/HERMES_HOME identity (not secrets), distribution version, plugin name, source commit, wheel filename and SHA-256, sdist/build identity if applicable, file-list hash, timestamp, and the staged directory path. It must be rerunnable and must not contact a network. The operator then sets, in the selected profile configuration:
 
-The matrix must cover:
+```yaml
+memory:
+  provider: <name>
+```
 
-- clean wheel install;
-- sdist build/install;
-- import and plugin discovery;
-- exactly-one-provider enforcement;
-- isolated adapter contract tests;
-- outbox/restart tests;
-- health/CLI surface;
-- uninstall/reinstall and rollback path.
+The value must exactly equal the bootstrapped directory name. Credentials and endpoint settings remain in the supported profile secret mechanism/environment; they are not arguments to the installer or embedded in the release artifact.
 
-## 4. Fail-closed checks
+### 2.2 Discovery and startup acceptance
 
-The package and loader must fail closed before provider operation when any of these conditions is detected:
+The release harness must run the **real pinned Hermes loader**, not an imitation: use the pinned Hermes checkout/installed host and a disposable `$HERMES_HOME` containing only the staged plugin and synthetic configuration. Record the loader source revision and the exact invocation in evidence. The harness must prove, with observable output or a machine-readable assertion:
 
-- unsupported Python version;
-- unsupported or mismatched pinned upstream version;
-- missing or invalid required configuration;
-- invalid endpoint/TLS/authentication settings;
-- duplicate composite-provider registration;
-- package metadata or entry-point mismatch;
-- missing required outbox/storage permissions;
-- integrity or checksum mismatch during controlled installation.
+- the loader resolves `<name>` from `$HERMES_HOME/plugins/<name>/`;
+- `register(ctx)` registers one composite provider;
+- the composite source is an actual `MemoryProvider` implementation satisfying the pinned ABC;
+- only the composite exposes Hermes memory tools; Mnemosyne and Hindsight adapters do not register providers or tools independently;
+- initialization, health check, one synthetic operation, shutdown, and a fresh-process reload all succeed;
+- no network request occurs during install/import/discovery (network calls are allowed only during explicitly tested adapter operations).
 
-Failure must identify the configuration category and remediation without exposing credentials, memory content, or full secret-bearing URLs. Best-effort continuation is not acceptable for a memory provider that could create split-brain or cross-profile behavior.
+The source-level discovery heuristic documented in issue #3 is not enough. A source grep or successful Python import without the real loader is a **FAIL** for this gate.
 
-## 5. Release artifact bundle
+### 2.3 Duplicate-provider behavior and Hermes limitation
 
-Every release must include:
+The pinned Hermes `MemoryManager.add_provider()` rejects a second external provider by logging a warning and dropping it; it does not raise. Therefore the core loader cannot be described as fail-closed for duplicates. This release contract requires a fail-closed **bootstrap/launch wrapper** (or a validated equivalent integration guard) that, before starting Hermes, proves that exactly one external provider is configured and discoverable and that no competing external provider is being loaded. It must treat the pinned loader's duplicate-provider warning as an error, terminate before memory operation, and return a non-zero status with a redacted remediation message.
 
-1. Wheel (`.whl`) and source distribution (`.tar.gz`).
-2. SHA-256 checksums for each artifact.
-3. Dependency lockfile/export with hashes for the supported matrix.
-4. CycloneDX SBOM covering distributed runtime dependencies and their versions, hashes, licenses, and relationships.
-5. License/notice inventory and the composite's MIT `LICENSE`/SPDX metadata, subject to issue #9's review.
-6. Reproducible clean-install evidence for wheel and sdist.
-7. Package file-list inspection proving no `.env`, database/WAL, logs, real memory fixtures, local paths, or credentials are included.
-8. Test results for the compatibility and isolation matrix.
-9. A signed, protected tag and release provenance/checksum record.
-10. Versioned release notes naming upstream pins, supported Python versions, configuration changes, restart requirements, and rollback target.
+The guard must be tested with: one composite provider (pass), composite plus a second external plugin (fail before operation), missing plugin (fail), and a builtin-only configuration if unsupported by this product (fail with explicit remediation). If the wrapper cannot observe and enforce this boundary on the pinned host, the release is blocked; the report must not claim that Hermes itself fails closed. The composite must never call `register_memory_provider` for either adapter.
 
-The release itself is not complete if it has only a source archive or an unverified wheel.
+## 3. Compatibility and support gates
 
-## 6. Required CI/local evidence before publish readiness
+The release matrix is the Cartesian product of each claimed Python version, each declared platform tag, wheel installation, and sdist build/install. For every cell, run the real pinned-loader suite described above plus adapter contract, outbox/restart, health/CLI, package-content, and duplicate-provider tests.
 
-CI is authoritative and local runs are advisory. The pipeline must build from a clean pinned checkout and verify:
+Python 3.11–3.13 may appear in release metadata only if all three pass the complete matrix with the same recorded upstream pins and a resolved lock/export. Python 3.13 is currently **unverified**. A failure or missing cell narrows support to the passing versions and is recorded as a release decision; it is not waived as an upstream or local-environment issue.
 
-- wheel and sdist build successfully;
-- artifact contents are safe;
-- checksums and SBOM are generated;
-- fresh environments install using hashes;
-- Python 3.11, 3.12, and 3.13 pass the compatibility suite;
-- provider discovery registers exactly one provider;
-- unsupported/missing/duplicate configurations fail closed;
-- tests cover restart, outbox, health/CLI, and rollback-compatible version identity;
-- security/license/secret scans from issue #9 pass or have explicit dispositions.
+A cell fails closed on:
+
+- unsupported Python/platform or interpreter ABI;
+- mismatch between recorded and installed upstream/package versions or hashes;
+- missing/invalid configuration, endpoint, TLS, or authentication;
+- missing plugin directory, metadata, entry-point/loader contract, or file-list mismatch;
+- duplicate external provider;
+- unavailable required outbox/storage path or unsafe permissions;
+- artifact/signature/attestation verification failure.
+
+Error evidence must identify the category and remediation while redacting credentials, memory content, and secret-bearing URLs.
+
+## 4. Artifact integrity and private-release authenticity
+
+SHA-256 checksums detect accidental corruption; they do not authenticate who created an asset. A signed Git tag authenticates the tag object, not necessarily the attached wheel or sdist. Consequently, every release must provide both:
+
+1. a protected signed tag whose verified object is the exact source revision used to build; and
+2. an asset-level signed manifest/attestation covering each wheel and sdist filename, size, SHA-256, source revision, build environment identity, lockfile hash, and build command/tool versions.
+
+The project must choose and document a concrete trusted signing mechanism and verification key/fingerprint before the first release. Verification must be performed from a clean machine/profile using a pinned verifier or documented trusted GitHub/OIDC attestation service, with the trust root obtained out-of-band or from protected repository configuration. A checksum downloaded from the same untrusted release channel is not a trust root. Verification must fail on an unsigned, untrusted, missing, or hash-mismatched asset. Do not claim SLSA level, “signed release,” or trusted provenance until the selected mechanism's actual verification output is retained.
+
+Private GitHub access must be explicit: release download/build inputs use a short-lived, least-privilege credential supplied by the protected CI identity or an operator's preconfigured GitHub authentication, never a URL-embedded token, package metadata, shell history, or committed config. CI must fail if the private repository/release is inaccessible rather than silently resolving from public indexes. Dependency acquisition must use the hash-locked export and configured private source credentials only where required; no credential is permitted at import or runtime discovery. Retain redacted authentication method, repository/release identifier, and download verification result, not tokens.
+
+## 5. Build, sdist, and reproducibility contract
+
+The build starts from a clean, protected-tag checkout in an isolated environment. The manifest records build backend/tool versions, Python version, OS/architecture, lockfile hash, source commit, environment variables that affect the build, and exact artifacts produced.
+
+For the sdist gate, verify that:
+
+- the sdist can be built from the clean checkout with the selected backend;
+- a fresh isolated environment can build/install it on every declared platform/interpreter cell, using only declared build requirements and approved package sources;
+- the resulting installed plugin passes the same real-loader suite as the wheel;
+- build requirements are pinned or hash-locked separately from runtime requirements and are included in the evidence/SBOM boundary;
+- the sdist contains no generated local state or secrets.
+
+Build the same source twice in clean environments and compare normalized archive/file contents and hashes. If byte-for-byte reproducibility is not achieved, identify the nondeterministic fields, normalize them where possible, and record the residual difference and approval. “Build succeeded” alone is not reproducibility evidence.
+
+## 6. Staged update, health gate, and rollback
+
+Updates are not in-place mutations of a running provider. For an installed version `V` and candidate `V+1`:
+
+1. **Inventory:** record active version, plugin directory/file-list hash, config schema/data version, outbox depth/oldest item, and required artifact hashes. Stop if the active state is not verified.
+2. **Prepare:** verify the signed manifest/attestation and hashes offline; install dependencies into an inactive controlled environment; bootstrap the candidate into a new versioned plugin directory; run file-list, import, configuration, duplicate-provider, and synthetic-loader checks against that directory.
+3. **Stage:** preserve the active directory and a restorable copy/manifest of configuration and migration-relevant state. Do not run migrations yet. Switch the profile's plugin pointer/selected directory atomically only after preparation passes; never expose a partially copied directory.
+4. **Restart:** stop Hermes cleanly, start it with the candidate, and run the health gate before allowing traffic/memory operations. The gate must verify process readiness, exactly one provider, expected tool names, adapter connectivity/authentication without exposing secrets, writable outbox, zero unexpected startup errors, and one synthetic read/write or explicitly documented no-op health transaction.
+5. **Commit or recover:** mark the candidate active only after the health result is durably recorded. On timeout, crash, provider-count mismatch, tool mismatch, failed auth/config, outbox/storage failure, or any unexpected startup error, stop the candidate and atomically restore the prior version/configuration, restart, and rerun the same health gate. If the prior version cannot start, stop and require human intervention; do not fall back to a degraded provider or erase state.
+
+Migration limits must be explicit before implementation. V1 should declare either “no automatic schema/data migrations” or enumerate reversible, versioned migrations and their backup/rollback procedure. An update that needs an unreviewed irreversible migration is blocked. Rollback evidence must include candidate failure injection, restoration of the previous plugin and config/data state, restart output, health result, and outbox integrity check.
+
+The **first release exception** is explicit: there is no previous release artifact to restore. Therefore the first release cannot satisfy the normal rollback rehearsal or claim rollback support. Its gate is limited to verified uninstall/disable recovery to the prior non-plugin Hermes configuration, with a human-approved backup of configuration/state. The full previous-artifact rollback invariant begins with the second release and every later release must name its verified rollback target.
+
+## 7. Falsifiable health and CLI acceptance
+
+Health/CLI evidence is acceptable only when each check has a command or harness action, expected exit/status, bounded timeout, and captured sanitized output. At minimum the release harness must assert:
+
+- install/bootstrap: exit 0, expected versioned files present, no unexpected files, and recorded hashes match;
+- discovery: exit 0 and exactly one composite provider plus the expected tool-name set;
+- negative discovery: non-zero exit before any synthetic memory operation for missing plugin, bad config, unsupported interpreter, duplicate provider, and tampered artifact;
+- runtime health: bounded response within the declared timeout, status `healthy` (or the exact selected status), provider identity/version match, outbox writable, and no credential/content leakage in output;
+- restart: fresh process exits 0 and reproduces the same provider/tool identity;
+- rollback: injected candidate failure yields non-zero candidate health, restored version equals the recorded previous version, and restored health passes;
+- CLI surface: documented commands return the documented exit codes and stable machine-readable fields; unknown/malformed arguments return non-zero without a traceback or secret.
+
+A prose statement, screenshot, log line without an assertion, or test of a fake loader does not satisfy acceptance. Exact command names remain implementation-dependent until the project selects the bootstrap/build tooling; the release manifest must record the actual commands used rather than this report inventing them.
+
+## 8. Required release evidence bundle
+
+The private release is publish-ready only when the bundle contains, for every claimed matrix cell:
+
+1. signed-tag verification output and trusted asset-manifest/attestation verification output;
+2. exact package/distribution/plugin names, source revision, upstream pins, Hindsight client identity, build backend/tool versions, interpreter/platform, and lockfile/export hash;
+3. wheel and sdist, file lists, SHA-256 values, SBOM, license/notice inventory, and secret/content scan results;
+4. clean wheel install and sdist build/install evidence using the declared hash-locked inputs;
+5. real pinned-Hermes loader discovery evidence from `$HERMES_HOME/plugins/<name>/`, including the bootstrap record;
+6. positive and negative one-provider/duplicate-provider evidence, with the wrapper's non-zero fail-closed result;
+7. compatibility, adapter, outbox, restart, health/CLI, and rollback evidence with commands/actions, expected results, observed results, and sanitized output;
+8. update manifest naming the previous verified artifact, or an explicit first-release rollback exception;
+9. migration/configuration notes, recovery instructions, and residual findings with owner and disposition;
+10. private GitHub access/dependency-acquisition provenance sufficient to show which authenticated source was used without retaining secrets.
+
+CI is authoritative for publish readiness; local runs are advisory. Missing evidence is `BLOCKED`, never `PASS`.
 
 ## Safety invariants
 
-1. No public package publication in v1.
-2. No floating dependency resolution in a release.
-3. No install-time network call or credential requirement.
-4. No best-effort operation after a compatibility or identity mismatch.
-5. Every release has a verified previous artifact for rollback.
-6. Package contents are inspectable, reproducible, and free of secrets and real memory data.
+1. V1 is private GitHub only; PyPI requires a separate decision and security review trigger.
+2. No floating dependency resolution or unidentified Hindsight client.
+3. Wheel installation and Hermes plugin discovery are separate, verified steps.
+4. No install/import/discovery network call or credential requirement.
+5. Duplicate external providers fail before memory operation through a tested guard; the pinned Hermes warning/drop limitation is disclosed.
+6. No best-effort operation after identity, compatibility, integrity, health, or authentication failure.
+7. Updates are staged, atomic, restart-based, and health-gated; first release does not claim previous-artifact rollback.
+8. Every release after v1 names and verifies a previous artifact for rollback.
+9. Package contents and evidence contain no secrets, real memory data, or estate-identifying paths.
 
-## Newly visible successor questions
+## Successor decisions still required
 
-1. What exact package name and Python build backend will be used?
-2. Which Hindsight client/workspace package is the final runtime dependency?
-3. Which lockfile/build tool will provide cross-platform hashes?
-4. What private GitHub release access policy and signing workflow will protect artifacts?
-5. What exact migration/configuration compatibility policy applies between wheel versions?
-6. Which release evidence artifact format will issue #10 consume for staged rollout and rollback rehearsal?
-7. What decision and evidence are required before moving from private GitHub release to PyPI?
+1. Select and record the exact distribution name, plugin directory name, build backend, lock tool, Hindsight client package, platform matrix, and migration policy.
+2. Select the trusted asset-signing/attestation mechanism and out-of-band trust root.
+3. Implement and validate the bootstrap/launch duplicate-provider guard against the pinned real loader.
+4. Produce Python 3.11, 3.12, and 3.13 matrix evidence, or narrow support honestly.
+5. Define the concrete health/CLI harness and machine-readable evidence schema.
 
 ## Concise recommendation for issue #8
 
-Publish a private, signed GitHub release containing a pinned wheel and sdist, checksums, SBOM, lockfile, install evidence, and compatibility results for Python 3.11–3.13 against the pinned Hermes/Mnemosyne/Hindsight versions. Install by pinned wheel replacement and restart. Fail closed on unsupported versions, missing configuration, or duplicate providers. Defer PyPI until a separate publication and full-audit decision.
+Proceed only as a gated private-release design. Build and sign a pinned wheel and sdist, verify assets independently of checksums/tag signatures alone, install dependencies and then bootstrap the verified plugin into `$HERMES_HOME/plugins/<name>/`, configure exactly one provider, and exercise the real pinned Hermes loader. Keep Python 3.11–3.13 conditional on complete passing evidence, resolve the Hindsight client and package names before release, fail closed through a tested wrapper where Hermes itself only warns/drops duplicates, and use atomic staged restart/health/rollback procedures. The first release may establish install/disable recovery but cannot honestly claim a previous-artifact rollback.
