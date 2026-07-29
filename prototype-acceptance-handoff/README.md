@@ -11,10 +11,16 @@ Throwaway local acceptance harness. **Do not deploy or copy into production.** I
 
 `run_evidence.py` writes `evidence.json`; this is generated throwaway evidence.
 The evidence records a `source_revision` and binds the runner, verifier,
-harness, and tests by SHA-256. The revision may be an ancestor of the current
-`HEAD` (for example, later documentation-only commits are allowed), but the
-verifier requires `git merge-base --is-ancestor <source_revision> HEAD` and
-rejects every dirty worktree path except the generated `evidence.json` itself.
+harness, and tests by SHA-256. The verifier hashes those exact paths from the
+recorded Git revision with `git show` and requires the recorded hashes to match
+that revision; a matching current worktree alone is not sufficient. The
+revision may be an ancestor of the current `HEAD` (for example, later
+documentation-only commits are allowed), but the verifier requires
+`git merge-base --is-ancestor <source_revision> HEAD` and rejects every dirty
+worktree path except the generated `evidence.json` itself. Thus an ancestor is
+accepted only when it contains the exact runner, verifier, harness, and test
+bytes recorded in the evidence; a descendant that changes any of them must
+regenerate evidence.
 
 Run the checks from a clean checkout of the repository (a temporary checkout is
 recommended when verifying an uncommitted change):

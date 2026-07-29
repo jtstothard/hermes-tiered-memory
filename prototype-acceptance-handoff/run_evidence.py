@@ -43,6 +43,21 @@ def source_hashes() -> dict[str, str]:
     return {name: sha256_bytes((ROOT / name).read_bytes()) for name in SOURCE_FILES}
 
 
+def revision_source_hashes(revision: str) -> dict[str, str]:
+    """Hash the exact files stored in *revision*, not files in the worktree."""
+    hashes = {}
+    for name in SOURCE_FILES:
+        pathspec = f"{revision}:prototype-acceptance-handoff/{name}"
+        blob = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show", "--format=", "--no-ext-diff", pathspec],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            raise RuntimeError(f"source revision does not contain {name}")
+        hashes[name] = sha256_bytes(blob.stdout)
+    return hashes
+
+
 def source_manifest_hash(hashes: dict[str, str]) -> str:
     payload = json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
     return sha256_bytes(payload)
@@ -83,6 +98,10 @@ env["PYTHONDONTWRITEBYTECODE"] = "1"
 env["PYTHONHASHSEED"] = "0"
 run = subprocess.run(FIXED_COMMAND, cwd=REPO_ROOT, env=env, text=True, capture_output=True)
 hashes = source_hashes()
+source_revision = git("rev-parse", "HEAD")
+revision_hashes = revision_source_hashes(source_revision)
+if hashes != revision_hashes:
+    raise RuntimeError("current source files do not match HEAD; generate evidence from a clean revision")
 runner_hash = sha256_bytes(pathlib.Path(__file__).read_bytes())
 verifier_path = ROOT / "verify_evidence.py"
 verifier_hash = sha256_bytes(verifier_path.read_bytes())
@@ -110,7 +129,7 @@ summary = {
     "source_manifest_sha256": source_manifest_hash(hashes),
     "provenance": {
         "repository_root": ".",
-        "source_revision": git("rev-parse", "HEAD"),
+        "source_revision": source_revision,
         "worktree_dirty": bool(worktree),
         "worktree_status": worktree,
         "worktree_status_sha256": worktree_hash,

@@ -46,6 +46,21 @@ def source_hashes() -> dict[str, str]:
     return {name: sha256_bytes((ROOT / name).read_bytes()) for name in SOURCE_FILES}
 
 
+def revision_source_hashes(revision: str) -> dict[str, str]:
+    """Hash the exact files stored in *revision*, not files in the worktree."""
+    hashes = {}
+    for name in SOURCE_FILES:
+        pathspec = f"{revision}:prototype-acceptance-handoff/{name}"
+        blob = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "show", "--format=", "--no-ext-diff", pathspec],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            fail(f"recorded source revision does not contain {name}")
+        hashes[name] = sha256_bytes(blob.stdout)
+    return hashes
+
+
 def source_manifest_hash(hashes: dict[str, str]) -> str:
     payload = json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()
     return sha256_bytes(payload)
@@ -118,6 +133,9 @@ def main() -> None:
     )
     if ancestor_check.returncode != 0:
         fail("evidence source revision is not an ancestor of HEAD")
+    revision_sources = revision_source_hashes(source_revision)
+    if evidence.get("source_files") != revision_sources:
+        fail("recorded source hashes do not match the recorded source revision")
     actual_worktree = worktree_state()
     if provenance.get("worktree_status") != actual_worktree:
         fail("worktree state binding mismatch")
