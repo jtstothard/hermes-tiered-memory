@@ -23,6 +23,64 @@ V1 uses complete outbox reconciliation; deterministic, sampled cross-tier drift 
 
 ## 1. Reconciliation and state contract
 
+### 1.0 Durable schema and atomic relationships
+
+The contract is implemented as durable relational records; an in-memory queue, process-local retry counter, or process-local lease is not sufficient. The following logical schema is normative (column types are implementation-specific, but nullability, keys, and semantics are not):
+
+```text
+outbox
+  row_id                PRIMARY KEY
+  document_id           NOT NULL
+  mnemosyne_id          NOT NULL
+  mnemosyne_rev         NOT NULL
+  content_snapshot      NOT NULL
+  metadata_snapshot     NOT NULL
+  state                 NOT NULL             -- pending | in_flight | promoted | quarantined
+  state_version         NOT NULL             -- increments on every state/lease/fence mutation
+  owner_id, lease_id    nullable
+  lease_expires_at      nullable
+  fence                 NOT NULL DEFAULT 0
+  next_retry_at         nullable
+  attempt_no            NOT NULL DEFAULT 0  -- 1..5 within the current worker cycle
+  retry_cycle_no        NOT NULL DEFAULT 0  -- increments on each quarantine retry path
+  last_error_class      nullable
+  last_http_status      nullable
+  created_at, updated_at NOT NULL
+
+operation_attempt
+  attempt_id            PRIMARY KEY
+  row_id                FK outbox(row_id) NOT NULL
+  document_id           NOT NULL
+  mnemosyne_rev         NOT NULL
+  operation_kind        NOT NULL
+  operation_id          NOT NULL
+  attempt_no            NOT NULL
+  status                NOT NULL             -- in_flight | success | retryable_failure | permanent_failure | uncertain
+  request_recorded_at   NOT NULL
+  outcome_recorded_at   nullable
+  provider_status_ref   nullable
+  error_class/http_status nullable
+  UNIQUE(operation_id)
+
+transition_audit
+  transition_id         PRIMARY KEY
+  row_id                FK outbox(row_id) NOT NULL
+  expected_state_version, resulting_state_version NOT NULL
+  from_state, to_state, transition_name NOT NULL
+  actor, run_or_action_id, reason, recorded_at, fence NOT NULL
+
+snapshot_registry
+  snapshot_id           PRIMARY KEY
+  owner_id, fence       NOT NULL
+  transition_watermark, captured_at, lease_expires_at NOT NULL
+  status                 NOT NULL             -- active | completed | aborted
+  completed_at/aborted_at nullable
+snapshot_member(snapshot_id, row_id, expected_state_version, expected_rev, category,
+                PRIMARY KEY(snapshot_id, row_id))
+```
+
+`outbox` is the current materialized state; `operation_attempt` is append-only history and permits multiple attempts for one `(document_id, mnemosyne_rev, operation_kind)`. Therefore enqueue uniqueness is the logical source identity `(document_id, mnemosyne_rev)` (or an explicitly versioned equivalent), never an attempt number, and it MUST NOT prevent later attempt records. The source L1 write, outbox row creation/upsert, and initial transition audit are one atomic transaction. Each operation request record, its operation ID, and the `in_flight` transition are one durable transaction before any remote send. An outcome and the corresponding local transition/audit are committed atomically with CAS on `state_version` and `fence` where owned. Foreign keys and the snapshot membership primary key MUST be enforced; deleting an outbox row requires the archive protocol in §1.5.
+
 ### 1.1 State machine
 
 Each outbox row has a monotonically increasing `state_version`, an immutable transition/audit record, and (while active) an ownership lease:
@@ -70,6 +128,8 @@ any non-terminal state -> newer_revision_waiting -> newer_revision_eligible only
 
 The record MUST retain every operation outcome and its evidence. A newer revision MUST wait behind an older `in_flight` or uncertain operation; it may proceed only after the older operation is confirmed terminal (success or failure) and the per-document ordering lease/CAS advances. Local promotion still requires the current row state/version and fence.
 
+The post-promotion path is explicit: when an older revision reaches `promoted`, the ordering coordinator atomically records the older revision as terminal, advances the per-document ordering version under CAS, and moves the next queued newer revision from `newer_revision_waiting` to `newer_revision_eligible` (or leaves it eligible if already pending). A worker may submit that newer revision only after observing that committed ordering advance and acquiring its own lease/fence. If the older revision terminates in failure, the same ordering advance occurs according to the configured failure policy; a newer revision MUST NOT be blocked forever merely because the older row is quarantined. A stale coordinator/worker that loses this CAS must not submit the newer revision.
+
 If a future implementation elects synchronous retain, it must instead add a durable deduplication ledger keyed by logical operation, persist request/response/uncertain status, perform mandatory post-timeout reconciliation/status lookup, and prove duplicate suppression under crash injection. That is an alternative **implementation gate**, not an optional fallback and not part of the v1 decision.
 
 A fence prevents a stale worker from committing a stale **local** state transition after reclamation. It cannot cancel or roll back a remote request already accepted by Hindsight. Remote ordering/status lookup and per-document coordination above are therefore mandatory; claims that fencing alone prevents duplicate remote side effects are out of contract.
@@ -106,7 +166,9 @@ The health surface MUST expose at least:
 
 ### 1.5 Compaction, reconciliation snapshots, and watermarks
 
-Compaction and reconciliation MUST use a common monotonic transition watermark. Snapshot/watermark membership MUST be durable and visible to compaction: an atomic registry transaction (or equivalent lease/CAS protocol) MUST create the snapshot record, capture `(snapshot_id, transition_watermark, captured_at)`, register each selected row identity and expected `state_version`, and mark the run active before compaction can select candidates. The registry MUST expose active snapshot IDs, watermarks, row membership, lease expiry, and completion/abort state. Compaction MUST atomically check that registry membership is absent or the snapshot lease is expired and safely fenced before archival; a process-local list is insufficient. At the start of a reconciliation run, materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
+Compaction and reconciliation MUST use a common monotonic transition watermark. Snapshot/watermark membership MUST be durable and visible to compaction: an atomic registry transaction (or equivalent lease/CAS protocol) MUST create the snapshot record, capture `(snapshot_id, transition_watermark, captured_at)`, register each selected row identity and expected `state_version`, and mark the run active before compaction can select candidates. The snapshot owner is the reconciliation/replay run identified by `owner_id`; it MUST heartbeat/renew `lease_expires_at` before each bounded processing batch and before expiry, using CAS on `(snapshot_id, owner_id, fence, status=active)`. Renewal does not change the fence; takeover after expiry increments the snapshot fence and invalidates the old owner. The registry MUST expose active snapshot IDs, owners, fences, watermarks, row membership, lease expiry, and completion/abort state. A run MUST durably CAS `active -> completed` (with owner and fence) only after all members are processed and its report is persisted, or CAS `active -> aborted` with a reason on cancellation/failure. Lease expiry alone never authorizes archive or compaction; an expired snapshot must first be safely fenced and marked aborted (or otherwise removed by the registry CAS protocol).
+
+Compaction MUST atomically verify that registry membership is absent, or that the snapshot is durably `aborted`/`completed` under the current fence; an expired-but-active snapshot is a block, not permission. A process-local list is insufficient. At the start of a reconciliation run, materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
 
 Compaction MUST acquire the per-row archival lease (or an equivalent CAS) and archive only rows whose last transition is at or below the compaction watermark, whose state is terminal for compaction, and which are not currently selected by a reconciliation/replay snapshot. The archive marker/deletion CAS MUST include the expected `state_version`; any concurrent transition causes compaction to skip the row and emit `compaction_skip_concurrent_update`. Reconciliation MUST treat an archived row as valid only when the archive manifest contains the same row ID, final state, state version, and digest. Compaction MUST never delete a row that is newer than its snapshot watermark or one that lacks a verified archive record.
 
@@ -118,7 +180,7 @@ Issue #7 may choose storage tiers and a retention period, but it MUST not weaken
 
 Full outbox reconciliation is mandatory. Direct L1↔L2 comparison is sampled in v1 to bound remote load, but the sample, denominator, and SLO calculation are reproducible.
 
-At the start of each run, materialize the population snapshot described in §1.5. For each eligible identity, encode the tuple `(scope, identity, category, state_version, mnemosyne_rev)` with length-prefixed UTF-8 fields, sort by the canonical byte encoding, and record the snapshot ID, transition watermark, population count, category counts, and SHA-256 hash of the ordered tuple list. Select samples by the first 64 bits of `SHA-256(run_id || policy_version || category || identity)` against recorded category quotas; no unordered database iteration or unseeded random generator is allowed. The exact ordered selected list and selection hash MUST be retained.
+At the start of each run, materialize the population snapshot described in §1.5. For each eligible identity, encode the tuple `(scope, identity, category, state_version, mnemosyne_rev)` with canonical length-prefixed unsigned-32-bit byte lengths followed by UTF-8 bytes, in that field order; the encoding version is `tuple-v1`. Sort by the canonical tuple bytes and record the snapshot ID, transition watermark, population count, category counts, and SHA-256 hash of the ordered tuple list. The sampling seed is the exact UTF-8 byte concatenation of length-prefixed fields `(run_id, policy_version, category, identity)` under `seed-v1`; select by the big-endian first 64 bits of `SHA-256(seed-v1-bytes)`, then canonical tuple bytes as the complete tie-break. No unordered database iteration, platform-dependent serialization, or unseeded random generator is allowed. The exact ordered selected list and selection hash MUST be retained.
 
 Coverage is mechanically defined as `distinct sampled eligible tuples / distinct eligible tuples` for a run/category. The 24-hour rolling coverage denominator is the union of eligible identity tuples across all run snapshots in the window; the numerator is the union of those tuples sampled at least once. An identity that changes `state_version` or revision is a new tuple and does not inherit prior coverage. Empty categories are excluded from category ratios but recorded. Overall coverage is `sum(numerator across categories) / sum(denominator across categories)`, not an average of category percentages.
 
@@ -131,7 +193,7 @@ The drift result MUST contain:
 - a keyed `metadata_digest` over canonical identity/revision/delete metadata from each side, never over memory content;
 - run start/end, remote-call count, status-lookup count, and failure/unknown count.
 
-The default policy is a 30-minute cadence, at least 100 identities per run (or all identities when the population is smaller), at least 10 identities from each non-empty category, and at least 20% of each category when that category has fewer than 500 identities. Every category quota is applied as `min(population_in_category, configured_quota)`; no quota may demand more identities than exist. Allocation is deterministic: compute category quotas from the immutable population snapshot, select by the canonical hash ordering above, and break equal hash/order ties by canonical tuple bytes. These defaults are **implementation gates**: the disposable live spike may justify a revision, but selected values, remote-load budget, and rationale must be recorded before publish readiness.
+The default policy is a 30-minute cadence and total target `T=min(100, population_total)`. For each non-empty category `c` with population `N_c`, its floor quota is `q_c=min(N_c, max(10, ceil(0.20*N_c) if N_c<500 else 0))`; categories with `N_c>=500` receive no percentage floor. If `sum(q_c)>T`, allocate `T` seats by descending `q_c` and then canonical category bytes, never exceeding `N_c`. Otherwise, allocate the remaining `R=T-sum(q_c)` seats one at a time by largest remainder of proportional entitlement `R*N_c/sum(N_c)`; ties are broken by canonical category bytes, and a category is capped at `N_c`. If caps leave seats undistributed, repeat the same largest-remainder procedure over uncapped categories; if all categories are capped, the total is the population. This precisely handles low populations, empty categories (quota zero and recorded), caps, remainder distribution, and ties. Select each category's quota from its canonical hash order above. These defaults are **implementation gates**: the disposable live spike may justify a revision, but selected values, remote-load budget, and rationale must be recorded before publish readiness.
 
 The detection SLO is also a gate and MUST state maximum time-to-detect for a seeded mismatch, required 24-hour coverage, and pass/fail calculation. The proposed v1 target is detection of every seeded mismatch in a covered category within 2 hours at the default cadence, with at least 95% rolling coverage within 24 hours. For a seeded mismatch, pass means the first result whose canonical comparison reports that identity/category as mismatched has `detected_at - injected_at <= SLO`; missing, unknown, or late observations fail. A mismatch is an observable error and enters operator recovery; it never emits payload content.
 
@@ -143,7 +205,7 @@ Default thresholds are exact and configurable only through a versioned policy:
 
 - **Warning:** one warning for each `quarantined` transition, deduped by `(row_id, state_version)`; automatic reconciliation retries do not create a new warning unless they create a new quarantine state version.
 - **Page:** when any quarantine age is at least 5 hours (10 consecutive 30-minute sweeps), or when the oldest pending age increases on 3 consecutive sweeps while non-zero, or when no successful drain has completed for 5 hours.
-- **Warning clear/closure:** a quarantine warning remains open while its `(row_id, state_version)` condition exists. It enters `clearing` only after that exact row/state is promoted or otherwise confirmed terminally resolved; it closes on the next successful persisted reconciliation observation that confirms resolution. A failed, stale, or unknown observation leaves it open. A later quarantine with a new state version is a new warning key.
+- **Warning clear/closure:** a quarantine warning remains open while its `(row_id, state_version)` condition exists. A transition from that quarantine version to `pending` for either retry path is not success and does not clear the incident: after a successful persisted observation of the CAS transition, the old warning enters `clearing` with `closure_reason=superseded_by_retry` and `successor_cycle_no`; the successor retry cycle is opened/linked under its new quarantine state-version key before the old warning may be closed. If the retry succeeds, the successor warning enters `clearing` and closes on the next successful persisted reconciliation observation. If it fails and creates a new quarantine state version, the successor warning is opened and the prior warning closes as superseded in the same durable alert transaction. A failed, stale, or unknown observation leaves the old warning open. Thus a retry into a new version never creates an alert gap, and a later quarantine is a new dedupe key linked to the prior warning lineage.
 - **Page clear/closure:** a page condition must be absent for 2 consecutive successful sweeps, and the second sweep MUST persist the closure before notification state becomes closed. A single failed/unknown sweep does not clear an existing page; any re-observed threshold during clearing returns it to open and resets the clear streak.
 - **Unknown/degraded:** stale health, missing reconciliation completion, unresolved remote-operation status, stale worker heartbeat, or failed alert-state persistence is emitted as degraded/unknown and cannot be represented as healthy.
 
