@@ -32,9 +32,9 @@ The pinned upstream compatibility inputs already selected are:
 
 - Hermes Agent `v2026.7.20`, commit `3ef6bbd201263d354fd83ec55b3c306ded2eb72a`;
 - Mnemosyne `v3.14.0`, commit `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce`;
-- Hindsight `v0.8.6`, commit `08995e3`; this does **not** identify the Python client package.
+- Hindsight `v0.8.6`, commit `08995e3013858e705fb4ca27c0ade3a286ef4750`; this source pin does **not** identify the Python client package.
 
-No artifact may use `latest`, an unrecorded workspace member, or an unhashable floating dependency. Resolving the Hindsight client and final package names is a prerequisite, not a documentation detail.
+The Hindsight source pin and the client dependency are separate manifest records. The client record MUST name the exact distribution/project name, client version, resolved source (index URL or VCS URL), commit or artifact SHA-256 where applicable, and every runtime dependency/hash. The source repository's generated client package must not be inferred from the repository name. No artifact may use `latest`, an unrecorded workspace member, or an unhashable floating dependency. Resolving the Hindsight client and final package names is a prerequisite, not a documentation detail.
 
 ## 2. Exact install and Hermes discovery contract
 
@@ -45,7 +45,24 @@ The wheel must contain the plugin source under a deterministic, declared package
 A wheel installed into an arbitrary virtual environment is **not sufficient** for discovery. On the pinned Hermes loader, discovery checks the bundled plugin directory and then `$HERMES_HOME/plugins/<name>/`; it loads that directory and selects it from `memory.provider`. The release procedure therefore has two distinct steps:
 
 1. **Dependency install:** install the exact wheel into the controlled Hermes Python environment using the release lock/export and artifact hashes, with no import-time network access or credentials.
-2. **Plugin bootstrap:** copy or extract only the verified plugin directory from that wheel into the target profile's `$HERMES_HOME/plugins/<name>/` using a versioned staging directory. The bootstrap must reject path traversal, unexpected files, and an existing directory whose manifest/version does not match. It must never copy a wheel blindly over an active directory.
+2. **Plugin bootstrap:** the implementation MUST expose one non-network bootstrap operation whose input is `(wheel path, target HERMES_HOME/profile, expected manifest)`. It MUST map exactly one declared wheel subdirectory to `$HERMES_HOME/plugins/<name>/`, where `<name>` is the manifest's `plugin_directory`; the mapping MUST NOT be inferred from an arbitrary top-level wheel directory. It MUST extract to a fresh staging directory under the target plugin root, reject absolute paths, `..` components, symlink/hardlink entries, duplicate normalized paths, and any archive member outside the staging root, then allow only the manifest's file allowlist plus the manifest itself. It MUST verify wheel `RECORD`, per-file SHA-256, distribution name/version, plugin name, source revision, and expected file-list hash before activation. Existing active content MUST remain untouched until verification passes; a version mismatch or unexpected file is a hard failure.
+
+The minimum bootstrap manifest schema is:
+
+```json
+{
+  "schema": 1,
+  "distribution": {"name": "<exact-name>", "version": "<exact-version>"},
+  "plugin_directory": "<loader-directory-name>",
+  "wheel": {"filename": "<filename>", "sha256": "<64-lowercase-hex>"},
+  "source": {"revision": "<full-commit-sha>"},
+  "files": [{"path": "<relative-posix-path>", "sha256": "<64-lowercase-hex>"}],
+  "file_list_sha256": "<64-lowercase-hex>",
+  "loader": {"project": "Hermes Agent", "revision": "<full-commit-sha>"}
+}
+```
+
+The schema validator MUST reject missing/unknown required fields, non-relative paths, duplicate paths, invalid SHA-256 values, and a `plugin_directory` that is empty, contains separators, or differs from `memory.provider`. The bootstrap verifier MUST return non-zero and produce a sanitized structured failure; no release may claim this gate until the operation, validator, verifier, and negative tests exist. Required negative tests are: `../` traversal, absolute member, symlink/hardlink, duplicate normalized path, undeclared file, modified file, wrong wheel hash, wrong distribution/version, wrong plugin directory, malformed manifest, and interrupted staging. **No bootstrap implementation exists in this repository; this is a hard release blocker.**
 
 The bootstrap records: profile/HERMES_HOME identity (not secrets), distribution version, plugin name, source commit, wheel filename and SHA-256, sdist/build identity if applicable, file-list hash, timestamp, and the staged directory path. It must be rerunnable and must not contact a network. The operator then sets, in the selected profile configuration:
 
@@ -69,11 +86,19 @@ The release harness must run the **real pinned Hermes loader**, not an imitation
 
 The source-level discovery heuristic documented in issue #3 is not enough. A source grep or successful Python import without the real loader is a **FAIL** for this gate.
 
-### 2.3 Duplicate-provider behavior and Hermes limitation
+### 2.3 Duplicate-provider launch boundary and fail-closed guard
 
-The pinned Hermes `MemoryManager.add_provider()` rejects a second external provider by logging a warning and dropping it; it does not raise. Therefore the core loader cannot be described as fail-closed for duplicates. This release contract requires a fail-closed **bootstrap/launch wrapper** (or a validated equivalent integration guard) that, before starting Hermes, proves that exactly one external provider is configured and discoverable and that no competing external provider is being loaded. It must treat the pinned loader's duplicate-provider warning as an error, terminate before memory operation, and return a non-zero status with a redacted remediation message.
+The launch boundary is a **separate preflight process wrapper around the real Hermes process**: the wrapper owns the process boundary, starts no Hermes memory operation until preflight succeeds, and must terminate the child on any post-start invariant violation. It is not a change to `MemoryManager.add_provider()`. The pinned Hermes method rejects a second external provider by logging a warning and dropping it; it does not raise, so a loader warning alone is insufficient.
 
-The guard must be tested with: one composite provider (pass), composite plus a second external plugin (fail before operation), missing plugin (fail), and a builtin-only configuration if unsupported by this product (fail with explicit remediation). If the wrapper cannot observe and enforce this boundary on the pinned host, the release is blocked; the report must not claim that Hermes itself fails closed. The composite must never call `register_memory_provider` for either adapter.
+The wrapper's concrete preflight algorithm is:
+
+1. Enumerate the selected profile's configured `memory.provider`, every candidate directory under `$HERMES_HOME/plugins/`, and the pinned loader's discovered external-provider registrations using the real loader in a disposable synthetic configuration.
+2. Classify each discovered external provider by canonical plugin directory and registered provider identity; reject missing directories, unreadable/invalid manifests, and any provider not named by the selected manifest.
+3. Require exactly one external provider, and require it to be the manifest's composite. A second external directory/provider, a provider-name mismatch, or a duplicate registration is a failure before the synthetic memory operation.
+4. Run the real loader's startup/discovery assertion and treat the pinned duplicate warning/drop signal as failure if it occurs. Exit non-zero with a redacted reason and do not invoke any memory operation.
+5. Only after all assertions pass, `exec` the selected Hermes launch command, preserving its exit status. The operator/CI invocation MUST be the exact wrapper invocation recorded in the release manifest under `commands.launch_guard`; it must be the same invocation in CI and deployment. There is currently no implemented wrapper or launch command in this repository, so `commands.launch_guard` cannot honestly be populated and this gate is **BLOCKED**, not a passing command claim.
+
+The guard's required acceptance cases are: one composite (zero exit, one provider), composite plus a second external plugin (non-zero before operation), missing plugin (non-zero), malformed manifest (non-zero), duplicate registration/warning (non-zero), and builtin-only configuration if unsupported by this product (non-zero with remediation). Each case must record provider enumeration, whether the memory-operation sentinel was reached, exit status, and sanitized stderr/stdout. The composite must never call `register_memory_provider` for either adapter. If the wrapper cannot observe and enforce this boundary on the pinned host, the release is blocked; the report must not claim that Hermes itself fails closed.
 
 ## 3. Compatibility and support gates
 
@@ -102,7 +127,11 @@ SHA-256 checksums detect accidental corruption; they do not authenticate who cre
 
 The project must choose and document a concrete trusted signing mechanism and verification key/fingerprint before the first release. Verification must be performed from a clean machine/profile using a pinned verifier or documented trusted GitHub/OIDC attestation service, with the trust root obtained out-of-band or from protected repository configuration. A checksum downloaded from the same untrusted release channel is not a trust root. Verification must fail on an unsigned, untrusted, missing, or hash-mismatched asset. Do not claim SLSA level, “signed release,” or trusted provenance until the selected mechanism's actual verification output is retained.
 
-Private GitHub access must be explicit: release download/build inputs use a short-lived, least-privilege credential supplied by the protected CI identity or an operator's preconfigured GitHub authentication, never a URL-embedded token, package metadata, shell history, or committed config. CI must fail if the private repository/release is inaccessible rather than silently resolving from public indexes. Dependency acquisition must use the hash-locked export and configured private source credentials only where required; no credential is permitted at import or runtime discovery. Retain redacted authentication method, repository/release identifier, and download verification result, not tokens.
+Private GitHub access must be explicit: release download/build inputs use a short-lived, least-privilege credential supplied by the protected CI identity or an operator's preconfigured GitHub authentication, never a URL-embedded token, package metadata, shell history, or committed config. CI must fail if the private repository/release is inaccessible rather than silently resolving from public indexes.
+
+Private dependency index isolation is a separate gate. The lock/export MUST enumerate the only allowed package hosts (the private index host(s) and, only if explicitly approved per dependency, the immutable public host); the manifest MUST record each host and whether it is allowed for direct or transitive dependencies. CI and operator installs MUST use an isolated package configuration supplied through protected CI configuration or the operator's preconfigured secret mechanism, with credentials supplied via the package tool's supported credential store/environment—not command-line URLs, source files, or committed config. The resolver MUST reject redirects or hosts outside the allowlist, and MUST run with public fallback disabled. The negative test MUST make the private index unavailable while a dependency exists only there and assert a non-zero resolution/install result, no request to a public index, and no credential leakage. A second negative test MUST make an unapproved public-only dependency available and assert rejection. No private-index implementation, host allowlist, credential binding, or no-public-fallback test exists in this repository; this is a hard release blocker.
+
+Dependency acquisition must use the hash-locked export and configured private source credentials only where required; no credential is permitted at import or runtime discovery. Retain redacted authentication method, repository/release identifier, allowed-host policy, and download verification result, not tokens.
 
 ## 5. Build, sdist, and reproducibility contract
 
@@ -124,9 +153,12 @@ Updates are not in-place mutations of a running provider. For an installed versi
 
 1. **Inventory:** record active version, plugin directory/file-list hash, config schema/data version, outbox depth/oldest item, and required artifact hashes. Stop if the active state is not verified.
 2. **Prepare:** verify the signed manifest/attestation and hashes offline; install dependencies into an inactive controlled environment; bootstrap the candidate into a new versioned plugin directory; run file-list, import, configuration, duplicate-provider, and synthetic-loader checks against that directory.
-3. **Stage:** preserve the active directory and a restorable copy/manifest of configuration and migration-relevant state. Do not run migrations yet. Switch the profile's plugin pointer/selected directory atomically only after preparation passes; never expose a partially copied directory.
-4. **Restart:** stop Hermes cleanly, start it with the candidate, and run the health gate before allowing traffic/memory operations. The gate must verify process readiness, exactly one provider, expected tool names, adapter connectivity/authentication without exposing secrets, writable outbox, zero unexpected startup errors, and one synthetic read/write or explicitly documented no-op health transaction.
-5. **Commit or recover:** mark the candidate active only after the health result is durably recorded. On timeout, crash, provider-count mismatch, tool mismatch, failed auth/config, outbox/storage failure, or any unexpected startup error, stop the candidate and atomically restore the prior version/configuration, restart, and rerun the same health gate. If the prior version cannot start, stop and require human intervention; do not fall back to a degraded provider or erase state.
+3. **Stage:** preserve the active directory and a restorable backup set containing (a) the active versioned plugin directory plus its manifest/file-list hash, (b) the exact profile configuration bytes and mode/ownership, (c) the migration/data schema version, and (d) the Mnemosyne SQLite database and its SQLite sidecars (`-wal` and `-shm`) while the writer is quiesced. The backup record MUST include file sizes, SHA-256 values, SQLite `user_version`, journal mode, and a consistency marker. Do not run migrations yet.
+4. **Activate:** use a versioned directory layout `$HERMES_HOME/plugins/<name>/versions/<version>/` and an atomic symlink `$HERMES_HOME/plugins/<name>/current` pointing to the selected version; the pinned loader MUST be proven to follow this exact `current` directory. If the loader does not follow symlinks, use an atomically renamed active-directory layout instead and record that selected mechanism in the manifest; do not leave “plugin pointer” abstract. Prepare the candidate in a sibling staging directory, fsync required files/parent directories, and replace the symlink (or directory rename) atomically only after all checks pass. A crash before the switch leaves the old target; a crash after the switch leaves either the old or complete new target; a crash during staging leaves an ignored staging directory that startup removes or quarantines without selecting it. Never expose a partially copied directory.
+5. **Restart:** stop Hermes cleanly, start it with the candidate, and run the health gate before allowing traffic/memory operations. The gate must verify process readiness, exactly one provider, expected tool names, adapter connectivity/authentication without exposing secrets, writable outbox, zero unexpected startup errors, and one synthetic read/write or explicitly documented no-op health transaction.
+6. **Commit or recover:** mark the candidate active only after the health result is durably recorded. On timeout, crash, provider-count mismatch, tool mismatch, failed auth/config, outbox/storage failure, or any unexpected startup error, stop the candidate and atomically restore the prior version selection and exact configuration backup. Restore the migration/data version and the SQLite database with a consistent database/WAL set; never restore the main `.db` without its matching `-wal`/`-shm` state, and verify with SQLite integrity/user-version checks before restart. Rerun the same health gate and outbox integrity check. If the prior version cannot start, stop and require human intervention; do not fall back to a degraded provider or erase state.
+
+The backup/restore rehearsal MUST inject failure before switch, after switch, during candidate startup, and during migration (if migrations exist), then assert plugin identity, config hash, migration version, SQLite/WAL consistency, and outbox rows equal the pre-update inventory. **No versioned-directory activation, atomic selector, consistency backup/restore implementation, or crash-injection evidence exists in this repository; update/rollback remains a hard release blocker.**
 
 Migration limits must be explicit before implementation. V1 should declare either “no automatic schema/data migrations” or enumerate reversible, versioned migrations and their backup/rollback procedure. An update that needs an unreviewed irreversible migration is blocked. Rollback evidence must include candidate failure injection, restoration of the previous plugin and config/data state, restart output, health result, and outbox integrity check.
 
@@ -146,7 +178,29 @@ Health/CLI evidence is acceptable only when each check has a command or harness 
 
 A prose statement, screenshot, log line without an assertion, or test of a fake loader does not satisfy acceptance. Exact command names remain implementation-dependent until the project selects the bootstrap/build tooling; the release manifest must record the actual commands used rather than this report inventing them.
 
-## 8. Required release evidence bundle
+## 8. Machine-readable evidence contract and required bundle
+
+Every gate result MUST be a separate JSON object validated against the release evidence schema before it is considered evidence. The minimum schema is:
+
+```json
+{
+  "schema": 1,
+  "evidence_id": "<yyyy-mm-ddTHHMMSSZ>_<gate>_<python>_<platform>_<short-artifact-sha>",
+  "gate": "<stable-gate-name>",
+  "status": "PASS|FAIL|BLOCKED",
+  "source_revision": "<full-commit-sha>",
+  "artifact": {"filename": "<name>", "sha256": "<64-lowercase-hex>"},
+  "environment": {"python": "<exact-version>", "platform": "<OS-arch>", "loader_revision": "<full-commit-sha>"},
+  "command": {"argv": ["<actual-argv-elements>"], "tool_versions": {"<tool>": "<exact-version>"}},
+  "started_at": "<RFC3339>", "finished_at": "<RFC3339>", "exit_code": 0,
+  "expected": {"exit_code": 0, "assertions": ["<assertion-id>"]},
+  "observed": {"assertions": [{"id": "<assertion-id>", "result": true, "detail": "<sanitized>"}]},
+  "outputs": [{"path": "<bundle-relative-path>", "sha256": "<64-lowercase-hex>"}],
+  "redaction": {"secrets_removed": true, "payloads_synthetic_or_absent": true}
+}
+```
+
+The validator MUST enforce required fields, enum values, RFC3339 timestamps, `finished_at >= started_at`, integer exit code, exact artifact/source/loader hashes, unique `evidence_id`, assertion IDs matching the named gate, output paths staying inside the bundle, and `status=PASS` only when the observed assertions and expected exit code pass. `FAIL` is a tested negative result; `BLOCKED` is an unimplemented or unavailable gate and can never be promoted to `PASS`. Evidence filenames MUST equal `evidence_id.json`; gate names and matrix coordinates MUST use the manifest's stable vocabulary. A CI publish job MUST validate every JSON file, reject missing/duplicate/malformed/stale evidence, reject a PASS with missing command/tool-version/output provenance, reject an unlisted matrix cell or artifact hash, and exit non-zero before publishing. The repository currently has no release evidence validator or CI publish gate; this is a hard release blocker. Do not claim any passing release evidence from the prototype's fake/stdlib artifacts.
 
 The private release is publish-ready only when the bundle contains, for every claimed matrix cell:
 
@@ -179,9 +233,10 @@ CI is authoritative for publish readiness; local runs are advisory. Missing evid
 
 1. Select and record the exact distribution name, plugin directory name, build backend, lock tool, Hindsight client package, platform matrix, and migration policy.
 2. Select the trusted asset-signing/attestation mechanism and out-of-band trust root.
-3. Implement and validate the bootstrap/launch duplicate-provider guard against the pinned real loader.
+3. Implement and validate the concrete package bootstrap, versioned activation/restore mechanism, and launch duplicate-provider guard against the pinned real loader; retain the required negative/crash tests.
 4. Produce Python 3.11, 3.12, and 3.13 matrix evidence, or narrow support honestly.
-5. Define the concrete health/CLI harness and machine-readable evidence schema.
+5. Implement the evidence-schema validator and CI publish rejection gate, then define the concrete health/CLI harness and record its actual invocations.
+6. Select the private dependency index allowlist/credential mechanism and prove public fallback is rejected.
 
 ## Concise recommendation for issue #8
 
