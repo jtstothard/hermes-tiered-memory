@@ -12,11 +12,16 @@ Throwaway local acceptance harness. **Do not deploy or copy into production.** I
 ## Commands
 
 ```bash
-cd /home/hermes/.scratch/mnemosyne-hindsight-promotion/prototype-acceptance-handoff
-python3 -m unittest discover -s tests -v
-python3 run_evidence.py
-python3 verify_evidence.py
-python3 -m compileall -q acceptance_harness.py tests run_evidence.py verify_evidence.py
+cd /home/hermes/hermes-tiered-memory
+python3 -m unittest discover -s prototype-acceptance-handoff/tests -v
+python3 prototype-acceptance-handoff/run_evidence.py
+python3 prototype-acceptance-handoff/verify_evidence.py
+python3 -m compileall -q prototype-acceptance-handoff/acceptance_harness.py prototype-acceptance-handoff/tests prototype-acceptance-handoff/run_evidence.py prototype-acceptance-handoff/verify_evidence.py
 ```
 
 `run_evidence.py` writes `evidence.json`; this is generated throwaway evidence.
+The commands are rooted at this repository and never use an unrelated scratch
+checkout. Evidence remains `NON_CATALOG`/`FAKE_BOUNDARY` and `BLOCKED` for
+release purposes; the recorded repository revision, worktree state, runner and
+verifier hashes, interpreter, and platform are provenance only, not live
+integration or release evidence.

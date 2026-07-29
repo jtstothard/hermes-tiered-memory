@@ -8,13 +8,15 @@ import hashlib
 import json
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
 EVIDENCE_PATH = ROOT / "evidence.json"
-FIXED_COMMAND = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
-DISPLAY_COMMAND = "python3 -m unittest discover -s tests -v"
+FIXED_COMMAND = [sys.executable, "-m", "unittest", "discover", "-s", "prototype-acceptance-handoff/tests", "-v"]
+DISPLAY_COMMAND = "python3 -m unittest discover -s prototype-acceptance-handoff/tests -v"
 SOURCE_FILES = ("acceptance_harness.py", "tests/test_acceptance.py")
 EXPECTED_CASES = [
     "L1 hit", "L2 miss/fallback + L2->L1 backfill",
@@ -43,6 +45,16 @@ def source_manifest_hash(hashes: dict[str, str]) -> str:
     return sha256_bytes(payload)
 
 
+def git(*args: str) -> str:
+    return subprocess.check_output(["git", "-C", str(REPO_ROOT), *args], text=True).strip()
+
+
+def worktree_state() -> list[str]:
+    evidence_rel = "prototype-acceptance-handoff/evidence.json"
+    return [line for line in git("status", "--porcelain=v1", "--untracked-files=all").splitlines()
+            if line[3:] != evidence_rel]
+
+
 def main() -> None:
     evidence = json.loads(EVIDENCE_PATH.read_text())
     if evidence.get("harness") != "08-prototype-acceptance-handoff":
@@ -51,6 +63,8 @@ def main() -> None:
         fail("evidence command is not the fixed command")
     if evidence.get("test_cwd") != ".":
         fail("evidence cwd is not the controlled harness cwd")
+    if evidence.get("test_argv") != FIXED_COMMAND:
+        fail("evidence argv is not the fixed repository-relative command")
     if evidence.get("release_gate_status") != "BLOCKED":
         fail("prototype must remain BLOCKED for release")
     classification = evidence.get("evidence_classification", {})
@@ -71,11 +85,36 @@ def main() -> None:
     if evidence.get("source_manifest_sha256") != source_manifest_hash(actual_sources):
         fail("source manifest hash mismatch")
 
+    provenance = evidence.get("provenance", {})
+    if provenance.get("repository_root") != ".":
+        fail("evidence is not rooted at the repository")
+    if provenance.get("source_revision") != git("rev-parse", "HEAD"):
+        fail("evidence source revision is stale")
+    actual_worktree = worktree_state()
+    if provenance.get("worktree_status") != actual_worktree:
+        fail("worktree state binding mismatch")
+    if provenance.get("worktree_dirty") is not bool(actual_worktree):
+        fail("worktree dirty flag mismatch")
+    if provenance.get("worktree_status_sha256") != sha256_bytes("\n".join(actual_worktree).encode()):
+        fail("worktree state hash mismatch")
+    if provenance.get("runner_source_sha256") != sha256_bytes((ROOT / "run_evidence.py").read_bytes()):
+        fail("runner source hash mismatch")
+    if provenance.get("verifier_source_sha256") != sha256_bytes(pathlib.Path(__file__).read_bytes()):
+        fail("verifier source hash mismatch")
+    if provenance.get("interpreter") != sys.version:
+        fail("interpreter provenance mismatch")
+    if provenance.get("interpreter_executable") != sys.executable:
+        fail("interpreter executable provenance mismatch")
+    if provenance.get("platform") != platform.platform():
+        fail("platform provenance mismatch")
+    if provenance.get("python_implementation") != platform.python_implementation():
+        fail("python implementation provenance mismatch")
+
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONHASHSEED"] = "0"
-    run = subprocess.run(FIXED_COMMAND, cwd=ROOT, env=env, text=True, capture_output=True)
+    run = subprocess.run(FIXED_COMMAND, cwd=REPO_ROOT, env=env, text=True, capture_output=True)
     actual_stdout_hash = sha256_bytes(run.stdout.encode())
     actual_stderr_hash = sha256_bytes(run.stderr.encode())
     if run.returncode != evidence.get("test_exit_code"):

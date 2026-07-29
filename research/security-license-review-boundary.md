@@ -1,9 +1,9 @@
 # Issue #9 research: pre-publish security and license review boundary
 
 Date: 2026-07-29  
-Report revision: this file is being edited in the working tree and has no immutable report revision until it is committed. Do not use a later commit containing this file as evidence that its current text existed earlier.
+Report provenance: this report text is intentionally not self-bound to a future commit. At release packaging/review, the exact checked-in commit and SHA-256 for this file and its dependent contract files **MUST** be recorded after commit. The current source observations are bound to the named local baseline and upstream pins below; do not invent a current commit hash.
 
-Local source baseline for the observations below: commit `d80a9b5e4749490db8047ddf9ea7fbfd95ebbfd5` of this repository. This is the immutable checkout baseline for local claims, not the revision of this report. At packaging/review time, record the checked-in commit and SHA-256 of this file separately.
+Local source baseline for the observations below: commit `d80a9b5e4749490db8047ddf9ea7fbfd95ebbfd5` of this repository. This is the immutable checkout baseline for local claims, not the revision of this report. At packaging/review time, record the exact checked-in commit and SHA-256 of this file and its dependent contract files after commit.
 
 ## Scope and evidence policy
 
