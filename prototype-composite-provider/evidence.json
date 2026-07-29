@@ -1,0 +1,51 @@
+{
+  "prototype": "01-composite-provider-boundary",
+  "status": "PASS",
+  "command": "cd /home/hermes/.scratch/mnemosyne-hindsight-promotion/prototype-composite-provider && /usr/bin/python3 -m unittest discover -s tests -v",
+  "test_exit_code": 0,
+  "provider_names": [
+    "mnemosyne+hindsight"
+  ],
+  "tools": [
+    "memory_search",
+    "memory_store"
+  ],
+  "l1_events": [
+    [
+      "write",
+      "p1",
+      "bank-a",
+      "evidence",
+      "value"
+    ]
+  ],
+  "l2_events": [
+    [
+      "retain",
+      "p1",
+      "bank-a",
+      "evidence",
+      "value"
+    ]
+  ],
+  "trace": [
+    [
+      "l1_write_complete",
+      "p1",
+      "bank-a",
+      "evidence"
+    ],
+    [
+      "l2_queued",
+      "p1",
+      "bank-a",
+      "evidence"
+    ]
+  ],
+  "profile_bank_keys": [
+    "p1/bank-a/evidence"
+  ],
+  "stdout": "",
+  "stderr": "test_disconfirming_duplicate_registration_is_rejected (test_composite_provider.CompositeBoundaryTests.test_disconfirming_duplicate_registration_is_rejected) ... ok\ntest_disconfirming_l2_timeout_does_not_lose_l1_write (test_composite_provider.CompositeBoundaryTests.test_disconfirming_l2_timeout_does_not_lose_l1_write) ... ok\ntest_l1_hit_does_not_query_l2 (test_composite_provider.CompositeBoundaryTests.test_l1_hit_does_not_query_l2) ... ok\ntest_l1_miss_falls_back_to_l2 (test_composite_provider.CompositeBoundaryTests.test_l1_miss_falls_back_to_l2) ... ok\ntest_loads_as_one_provider_and_one_tool_namespace (test_composite_provider.CompositeBoundaryTests.test_loads_as_one_provider_and_one_tool_namespace) ... ok\ntest_profile_and_bank_isolation (test_composite_provider.CompositeBoundaryTests.test_profile_and_bank_isolation) ... ok\ntest_store_returns_after_sync_l1_and_queues_async_l2_retain (test_composite_provider.CompositeBoundaryTests.test_store_returns_after_sync_l1_and_queues_async_l2_retain) ... ok\n\n----------------------------------------------------------------------\nRan 7 tests in 0.002s\n\nOK\n",
+  "scope": "stdlib fake Mnemosyne/Hindsight only; no production services touched"
+}
