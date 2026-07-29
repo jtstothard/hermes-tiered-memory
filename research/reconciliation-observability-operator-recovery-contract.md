@@ -13,6 +13,8 @@ This ticket depends on:
 - Issue #5 — Hindsight revision, deletion, metadata, and batch semantics.
 - Issue #7 — outbox compaction and performance policy.
 
+For the restart path, this report is the superseding contract: its lease-expiry/CAS/fence rule replaces Issue #4 §6's former blanket `in_flight` reset wording. Issue #4 remains normative for the five-attempt retry schedule and 30-minute quarantine sweep, but not for recovery of an owned or uncertain `in_flight` row.
+
 The words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative. Parameters marked **implementation gate** must be selected, recorded, and tested before publish readiness; they are not permission to leave behavior unspecified.
 
 ## Decision
@@ -45,7 +47,28 @@ An `in_flight` claim MUST persist `owner_id`, `lease_id`, `lease_expires_at`, an
 
 V1 MUST call Hindsight `retain` in **async mode**. The caller MUST generate and persist an `operation_id` before sending, and MUST reuse it for the same logical `(document_id, mnemosyne_rev, operation_kind)` attempt after timeout, crash, or an uncertain response. The Issue #5 evidence says caller IDs make async retries idempotent, while `operation_id` is ignored for synchronous retain. Therefore `operation_id` alone MUST NOT be presented as protection for synchronous retain; synchronous retain is prohibited in v1.
 
-An async accepted response is not promotion proof by itself. The implementation MUST persist the operation ID and perform Hindsight operation-status lookup until success, retryable failure, permanent failure, or an explicit bounded `unknown` outcome. On a lost/uncertain response, status lookup MUST happen before a new submission. Per-document remote operations MUST be serialized (a durable per-document coordination key or equivalent remote ordering protocol), and a newer revision MUST NOT be submitted ahead of an unresolved older operation for that document. A remote status lookup or per-document operation record MUST establish whether the operation completed; local CAS/fence then decides whether this worker may commit the result.
+An async accepted response is not promotion proof by itself. The selected Hindsight client/provider MUST pass a capability gate before implementation: it must supply the exact status route, request/response schema, authentication/identity fields, polling interval and deadline, and mapping to `success`, `retryable_failure`, `permanent_failure`, `timeout`, and terminal `unknown`. No status API, route, or schema may be invented here. If the selected client cannot supply and test that contract, the integration is blocked. Until then, a missing, malformed, unavailable, or deadline-exceeded lookup is bounded `unknown`; it is not success and MUST NOT trigger resubmission. On a lost/uncertain response, status lookup MUST happen before a new submission, and no new submission is permitted after bounded `unknown` without an explicit operator/provider-resolution path that first establishes the prior outcome.
+
+### 1.2.1 Attempt identity and per-document ordering
+
+An operation attempt is identified by `(document_id, mnemosyne_rev, operation_kind, operation_id)`. The same `operation_id` MUST be reused only while that logical operation is `in_flight` or its outcome is uncertain (including process crash, timeout, lost response, or bounded `unknown`); it MUST NOT be reused for a different revision or operation kind. After a confirmed terminal retryable failure, a subsequent retry creates a new `operation_id` and retains the prior operation record and outcome. A confirmed permanent failure is terminal for that attempt and creates no automatic remote resubmission.
+
+For each document, the durable ordering state is:
+
+```text
+no_operation -> in_flight -> success -> promoted
+in_flight -> retryable_failure -> retry_pending -> in_flight (new operation_id)
+in_flight -> permanent_failure -> quarantined
+in_flight -> timeout -> uncertain
+in_flight -> unknown -> uncertain
+uncertain -> status_success -> promoted
+uncertain -> status_retryable_failure -> retry_pending (new operation_id)
+uncertain -> status_permanent_failure -> quarantined
+uncertain -> status_timeout|status_unknown -> uncertain (no resubmission)
+any non-terminal state -> newer_revision_waiting -> newer_revision_eligible only after the older operation is terminal
+```
+
+The record MUST retain every operation outcome and its evidence. A newer revision MUST wait behind an older `in_flight` or uncertain operation; it may proceed only after the older operation is confirmed terminal (success or failure) and the per-document ordering lease/CAS advances. Local promotion still requires the current row state/version and fence.
 
 If a future implementation elects synchronous retain, it must instead add a durable deduplication ledger keyed by logical operation, persist request/response/uncertain status, perform mandatory post-timeout reconciliation/status lookup, and prove duplicate suppression under crash injection. That is an alternative **implementation gate**, not an optional fallback and not part of the v1 decision.
 
@@ -83,7 +106,7 @@ The health surface MUST expose at least:
 
 ### 1.5 Compaction, reconciliation snapshots, and watermarks
 
-Compaction and reconciliation MUST use a common monotonic transition watermark. At the start of a reconciliation run, the system MUST atomically read a snapshot boundary `(snapshot_id, transition_watermark, captured_at)` and materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
+Compaction and reconciliation MUST use a common monotonic transition watermark. Snapshot/watermark membership MUST be durable and visible to compaction: an atomic registry transaction (or equivalent lease/CAS protocol) MUST create the snapshot record, capture `(snapshot_id, transition_watermark, captured_at)`, register each selected row identity and expected `state_version`, and mark the run active before compaction can select candidates. The registry MUST expose active snapshot IDs, watermarks, row membership, lease expiry, and completion/abort state. Compaction MUST atomically check that registry membership is absent or the snapshot lease is expired and safely fenced before archival; a process-local list is insufficient. At the start of a reconciliation run, materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
 
 Compaction MUST acquire the per-row archival lease (or an equivalent CAS) and archive only rows whose last transition is at or below the compaction watermark, whose state is terminal for compaction, and which are not currently selected by a reconciliation/replay snapshot. The archive marker/deletion CAS MUST include the expected `state_version`; any concurrent transition causes compaction to skip the row and emit `compaction_skip_concurrent_update`. Reconciliation MUST treat an archived row as valid only when the archive manifest contains the same row ID, final state, state version, and digest. Compaction MUST never delete a row that is newer than its snapshot watermark or one that lacks a verified archive record.
 
@@ -108,19 +131,20 @@ The drift result MUST contain:
 - a keyed `metadata_digest` over canonical identity/revision/delete metadata from each side, never over memory content;
 - run start/end, remote-call count, status-lookup count, and failure/unknown count.
 
-The default policy is a 30-minute cadence, at least 100 identities per run (or all identities when the population is smaller), at least 10 identities from each non-empty category, and at least 20% of each category when that category has fewer than 500 identities. These defaults are **implementation gates**: the disposable live spike may justify a revision, but selected values, remote-load budget, and rationale must be recorded before publish readiness.
+The default policy is a 30-minute cadence, at least 100 identities per run (or all identities when the population is smaller), at least 10 identities from each non-empty category, and at least 20% of each category when that category has fewer than 500 identities. Every category quota is applied as `min(population_in_category, configured_quota)`; no quota may demand more identities than exist. Allocation is deterministic: compute category quotas from the immutable population snapshot, select by the canonical hash ordering above, and break equal hash/order ties by canonical tuple bytes. These defaults are **implementation gates**: the disposable live spike may justify a revision, but selected values, remote-load budget, and rationale must be recorded before publish readiness.
 
 The detection SLO is also a gate and MUST state maximum time-to-detect for a seeded mismatch, required 24-hour coverage, and pass/fail calculation. The proposed v1 target is detection of every seeded mismatch in a covered category within 2 hours at the default cadence, with at least 95% rolling coverage within 24 hours. For a seeded mismatch, pass means the first result whose canonical comparison reports that identity/category as mismatched has `detected_at - injected_at <= SLO`; missing, unknown, or late observations fail. A mismatch is an observable error and enters operator recovery; it never emits payload content.
 
 ## 3. Alerts, deduplication, and hysteresis
 
-Alert state is durable across process restarts. Each alert has a dedupe key, first-seen time, last-seen time, severity, occurrence count, and clear time. Re-emitting the same condition updates one alert rather than creating an unbounded stream.
+Alert state is durable across process restarts. Each alert has a dedupe key, first-seen time, last-seen time, severity, occurrence count, and clear time. Re-emitting the same condition updates one alert rather than creating an unbounded stream. Alerts have explicit `open`, `clearing`, and `closed` states; closure is an auditable state transition, not deletion. A closed condition may create a new alert only when its dedupe condition is observed again after closure, with a new first-seen time and occurrence count.
 
 Default thresholds are exact and configurable only through a versioned policy:
 
 - **Warning:** one warning for each `quarantined` transition, deduped by `(row_id, state_version)`; automatic reconciliation retries do not create a new warning unless they create a new quarantine state version.
 - **Page:** when any quarantine age is at least 5 hours (10 consecutive 30-minute sweeps), or when the oldest pending age increases on 3 consecutive sweeps while non-zero, or when no successful drain has completed for 5 hours.
-- **Clear:** a page condition must be absent for 2 consecutive successful sweeps. A single failed/unknown sweep does not clear an existing page.
+- **Warning clear/closure:** a quarantine warning remains open while its `(row_id, state_version)` condition exists. It enters `clearing` only after that exact row/state is promoted or otherwise confirmed terminally resolved; it closes on the next successful persisted reconciliation observation that confirms resolution. A failed, stale, or unknown observation leaves it open. A later quarantine with a new state version is a new warning key.
+- **Page clear/closure:** a page condition must be absent for 2 consecutive successful sweeps, and the second sweep MUST persist the closure before notification state becomes closed. A single failed/unknown sweep does not clear an existing page; any re-observed threshold during clearing returns it to open and resets the clear streak.
 - **Unknown/degraded:** stale health, missing reconciliation completion, unresolved remote-operation status, stale worker heartbeat, or failed alert-state persistence is emitted as degraded/unknown and cannot be represented as healthy.
 
 The alert event includes policy version, threshold, dedupe key, affected counts/ages, transition/run ID, and whether the condition arose from automatic retry or operator replay. Threshold overrides require an operator action and audit record; they do not silently alter the contract.
@@ -175,9 +199,25 @@ A mock provider, fake clock, synthetic rows, or fixture-only test is **synthetic
 
 ### Disposable live integration evidence
 
-Before publish readiness, a disposable isolated environment (no production data or credentials) MUST exercise the real Hindsight client/API against synthetic content. The live run MUST inject bounded failures at these points: before request persistence; after operation-ID persistence but before send; after async send before response receipt; during operation-status lookup; lease expiry/reclamation while a worker is active; stale worker local commit after a newer fence; a newer revision arriving behind an unresolved older operation; Hindsight 429/5xx/4xx; reconciliation retry failure/success; replay snapshot staleness; compaction racing with reconciliation; drift mismatch injection; alert-store restart; and telemetry sink rejection.
+Before publish readiness, a disposable isolated environment (no production data or credentials) MUST exercise the real Hindsight client/API against synthetic content. Fault injection is a harness contract, not an informal checklist. The harness MUST expose a named injection seam, deterministic trigger, bounded failure, expected state transitions, retry/resubmission rule, and oracle for every case; it MUST record whether the seam was reached. The minimum manifest is:
 
-Each injection needs a pass/fail oracle recorded before the run: no lost outbox row; no duplicate logical remote operation for the same async operation ID; status lookup resolves uncertain outcomes before resubmission; stale workers cannot commit locally; remote operations for one document remain ordered; only the correct retry path and budget is used; stale replay items are skipped with the specified reason and no remote call; compaction preserves an archive and never removes both copies; the seeded drift is detected within the selected SLO and coverage formula matches recomputation; alerts dedupe and clear only under policy; forbidden telemetry values are absent at both boundaries. The run must record environment identity, software/config/policy versions, timestamps, workload size, injection manifest, raw outcome counts, oracle results, and teardown proof. If no disposable live integration is available, readiness remains blocked; local fakes must not be relabeled as live evidence.
+| Case / injection seam | Trigger | Expected state/retry | Oracle |
+|---|---|---|---|
+| request-persistence boundary | crash before durable request record | row remains recoverable; no send | row exists or atomic transaction rolled back; no lost promotion |
+| operation-ID/send boundary | crash after ID persistence, before send | same ID reused; no new ID | operation record and next request share ID |
+| async response boundary | drop response after send | `uncertain`; status lookup before any resubmission | no duplicate logical operation; status resolves or remains bounded unknown |
+| status lookup seam | timeout, malformed response, provider 5xx | bounded `unknown`; no resubmission | unknown is visible and no send occurs |
+| lease/fence seam | expire lease while worker is active | expired row reclaimed by CAS with higher fence; stale worker loses commit | stale worker cannot commit locally; remote cancellation is not claimed |
+| per-document ordering seam | newer revision arrives behind unresolved older op | newer revision waits | no newer remote submission before older terminal outcome |
+| provider response classes | inject 429, 5xx, and documented 4xx | retryable uses budget/Retry-After; permanent quarantines | exact classification, attempt, and transition audit |
+| reconciliation retry seam | automatic sweep fails, then succeeds | quarantine remains on failure; distinct automatic retry promotes on success | correct path/budget and separate audit/alert behavior |
+| replay snapshot seam | mutate target after snapshot | item skipped with specified reason; no remote call | `state_version`/revision CAS rejection and skip count |
+| compaction/registry seam | race archival with active snapshot/reconciliation | compaction skips or safely fences; archive-before-delete | active membership visible; no loss from live and archive |
+| drift seam | inject seeded cross-tier mismatch | mismatch reported within selected SLO | recomputed coverage/selection hashes match and detection timestamp passes |
+| alert-store seam | restart/reject durable alert store | state remains open or becomes unknown, never falsely clears | dedupe and closure require policy-success observations |
+| telemetry sink seam | reject or inspect emitted event | event is scrubbed/rejected safely | forbidden values absent at logger and sink boundaries |
+
+The live run MUST execute every manifest row, with injection seam, trigger, expected state, retry policy, oracle result, and reached/not-reached status recorded before and after the run. It must also record environment identity, software/config/policy versions, timestamps, workload size, raw outcome counts, and teardown proof. If no disposable live integration or a provider-supplied status capability contract is available, readiness remains blocked; local fakes must not be relabeled as live evidence.
 
 The live spike measures drain latency, status-lookup/drift remote-call load, async retry behavior, and validates or rejects default thresholds. Any parameter it changes becomes a versioned gate with an explicit rationale.
 
@@ -194,7 +234,7 @@ The live spike measures drain latency, status-lookup/drift remote-call load, asy
 
 ## Explicit successor gates
 
-1. **Operation semantics:** freeze async retain mode, caller operation-ID persistence/reuse, status lookup, per-document ordering, and the uncertain-response oracle; synchronous retain requires the separate ledger gate in §1.2.
+1. **Operation semantics:** freeze async retain mode, caller operation-ID persistence/reuse, the provider-supplied status capability (route/schema/polling/terminal mapping), per-document ordering, and the uncertain-response oracle; synchronous retain requires the separate ledger gate in §1.2.
 2. **Drift policy:** approve cadence, category quotas, canonical encoding, coverage denominator/formula, detection SLO, and remote-call budget from the disposable spike.
 3. **Retention and concurrency policy:** approve archive format, retention period, watermark protocol, deletion authorization, and recovery/race test with Issue #7.
 4. **Alert policy:** approve threshold version, notification routing, and durable alert-state store.
