@@ -61,16 +61,49 @@ operation_attempt
   provider_status_ref   nullable
   error_class/http_status nullable
   UNIQUE(operation_id)
+  UNIQUE(row_id, retry_cycle_no, attempt_no)
 
 transition_audit
   transition_id         PRIMARY KEY
   row_id                FK outbox(row_id) NOT NULL
   expected_state_version, resulting_state_version NOT NULL
   from_state, to_state, transition_name NOT NULL
+  transition_seq        NOT NULL             -- allocated from transition_sequence
   actor, run_or_action_id, reason, recorded_at, fence NOT NULL
+
+transition_sequence
+  sequence_name         PRIMARY KEY        -- one global sequence per bank/profile
+  next_seq              NOT NULL
+
+// One durable ordering ledger row per document. It is the serialization point
+// for revisions; it is not reconstructed from the outbox or audit log.
+document_ordering
+  document_id           PRIMARY KEY
+  ordering_version      NOT NULL
+  eligible_revision     nullable
+  terminal_revision     nullable
+  terminal_outcome      nullable             -- promoted | failed | quarantined
+  owner_id, lease_id    nullable
+  fence                 NOT NULL DEFAULT 0
+  updated_at             NOT NULL
+  UNIQUE(document_id, eligible_revision)
+
+sweep_run
+  run_id                PRIMARY KEY
+  run_kind              NOT NULL             -- automatic_reconciliation
+  owner_id, lease_id    NOT NULL
+  fence                 NOT NULL
+  status                 NOT NULL             -- running | succeeded | failed | aborted | unknown
+  cadence_slot          NOT NULL
+  started_at, lease_expires_at NOT NULL
+  completed_at           nullable
+  transition_watermark  nullable
+  quota_policy_version, audit_scope, alert_scope NOT NULL
+  UNIQUE(run_kind, cadence_slot)
 
 snapshot_registry
   snapshot_id           PRIMARY KEY
+  run_id                FK sweep_run(run_id) nullable
   owner_id, fence       NOT NULL
   transition_watermark, captured_at, lease_expires_at NOT NULL
   status                 NOT NULL             -- active | completed | aborted
@@ -79,7 +112,7 @@ snapshot_member(snapshot_id, row_id, expected_state_version, expected_rev, categ
                 PRIMARY KEY(snapshot_id, row_id))
 ```
 
-`outbox` is the current materialized state; `operation_attempt` is append-only history and permits multiple attempts for one `(document_id, mnemosyne_rev, operation_kind)`. Therefore enqueue uniqueness is the logical source identity `(document_id, mnemosyne_rev)` (or an explicitly versioned equivalent), never an attempt number, and it MUST NOT prevent later attempt records. The source L1 write, outbox row creation/upsert, and initial transition audit are one atomic transaction. Each operation request record, its operation ID, and the `in_flight` transition are one durable transaction before any remote send. An outcome and the corresponding local transition/audit are committed atomically with CAS on `state_version` and `fence` where owned. Foreign keys and the snapshot membership primary key MUST be enforced; deleting an outbox row requires the archive protocol in §1.5.
+`outbox` is the current materialized state; `operation_attempt` is append-only history and permits multiple attempts for one `(document_id, mnemosyne_rev, operation_kind)`. Therefore enqueue uniqueness is the logical source identity `(document_id, mnemosyne_rev)` (or an explicitly versioned equivalent), never an attempt number, and it MUST NOT prevent later attempt records. The `(row_id, retry_cycle_no, attempt_no)` unique constraint is the durable attempt slot: allocating a slot and inserting its operation record MUST be one transaction. A duplicate slot is rejected by the database, emits `duplicate_attempt_slot` with the existing slot/operation ID and actor/run ID, and MUST NOT send remotely or advance row state; retries must reread the existing record and reconcile it. The source L1 write, outbox row creation/upsert, and initial transition audit are one atomic transaction. Each operation request record, its operation ID, and the `in_flight` transition are one durable transaction before any remote send. An outcome and the corresponding local transition/audit are committed atomically with CAS on `state_version` and `fence` where owned. Foreign keys and the snapshot membership primary key MUST be enforced; deleting an outbox row requires the archive protocol in §1.5. Every transition obtains and persists the next `transition_seq` in the same transaction as its state change and audit; allocation is a durable CAS/row lock, so sequences are monotonic and never process-local. A failed transaction consumes no externally visible sequence; a committed transition has exactly one sequence and audit record.
 
 ### 1.1 State machine
 
@@ -126,6 +159,8 @@ uncertain -> status_timeout|status_unknown -> uncertain (no resubmission)
 any non-terminal state -> newer_revision_waiting -> newer_revision_eligible only after the older operation is terminal
 ```
 
+The durable `document_ordering` row is the per-document serialization ledger. For every document, `ordering_version`, `eligible_revision`, `terminal_revision`, and `terminal_outcome` are updated under owner/fence/CAS; the ledger is never inferred from a scan of outbox rows. A revision is eligible only when it is the ledger's `eligible_revision` and the prior `terminal_revision` is recorded. Completion of an older revision and promotion of the next revision to `eligible_revision` MUST be one atomic transaction that increments `ordering_version`, records the terminal outcome, and appends the transition audit with one `transition_seq`. A stale coordinator that loses this CAS MUST abandon submission and emit an ordering conflict. The ledger fence is separate from the row fence, and both must be current for a submission.
+
 The record MUST retain every operation outcome and its evidence. A newer revision MUST wait behind an older `in_flight` or uncertain operation; it may proceed only after the older operation is confirmed terminal (success or failure) and the per-document ordering lease/CAS advances. Local promotion still requires the current row state/version and fence.
 
 The post-promotion path is explicit: when an older revision reaches `promoted`, the ordering coordinator atomically records the older revision as terminal, advances the per-document ordering version under CAS, and moves the next queued newer revision from `newer_revision_waiting` to `newer_revision_eligible` (or leaves it eligible if already pending). A worker may submit that newer revision only after observing that committed ordering advance and acquiring its own lease/fence. If the older revision terminates in failure, the same ordering advance occurs according to the configured failure policy; a newer revision MUST NOT be blocked forever merely because the older row is quarantined. A stale coordinator/worker that loses this CAS must not submit the newer revision.
@@ -147,6 +182,8 @@ Automatic reconciliation MUST NOT be described as operator replay, and operator 
 
 ### 1.4 Complete reconciliation and drain semantics
 
+A reconciliation run MUST first claim one durable `sweep_run` for its `(run_kind, cadence_slot)`. Claim uses owner/lease/fence CAS; a live unexpired run is not overlapped, and a second trigger records `sweep_overlap_skipped` bound to the existing `run_id`. An expired run is fenced and marked `aborted` before a replacement claims the slot. Every snapshot, quota decision, retry transition, audit event, alert, health record, and completion report produced by the sweep MUST carry and validate that `run_id`; no cadence/quota/audit/alert record may be attributed only to a worker or wall-clock timestamp. The run lease is renewed before each batch and before expiry. Completion is one owner/fence CAS to `succeeded`, `failed`, `aborted`, or `unknown`, with the transition watermark and report persisted first.
+
 A reconciliation run MUST inspect every non-archived outbox row and verify state, lease expiry, retry eligibility, transition integrity, and remote-operation status for unresolved async operations. It MUST NOT silently delete or rewrite a row. State transitions, claims, lease expiry/reclamation, CAS conflicts, remote operation IDs (never payloads), automatic retry outcomes, and operator actions are audit events.
 
 The health surface MUST expose at least:
@@ -166,9 +203,11 @@ The health surface MUST expose at least:
 
 ### 1.5 Compaction, reconciliation snapshots, and watermarks
 
-Compaction and reconciliation MUST use a common monotonic transition watermark. Snapshot/watermark membership MUST be durable and visible to compaction: an atomic registry transaction (or equivalent lease/CAS protocol) MUST create the snapshot record, capture `(snapshot_id, transition_watermark, captured_at)`, register each selected row identity and expected `state_version`, and mark the run active before compaction can select candidates. The snapshot owner is the reconciliation/replay run identified by `owner_id`; it MUST heartbeat/renew `lease_expires_at` before each bounded processing batch and before expiry, using CAS on `(snapshot_id, owner_id, fence, status=active)`. Renewal does not change the fence; takeover after expiry increments the snapshot fence and invalidates the old owner. The registry MUST expose active snapshot IDs, owners, fences, watermarks, row membership, lease expiry, and completion/abort state. A run MUST durably CAS `active -> completed` (with owner and fence) only after all members are processed and its report is persisted, or CAS `active -> aborted` with a reason on cancellation/failure. Lease expiry alone never authorizes archive or compaction; an expired snapshot must first be safely fenced and marked aborted (or otherwise removed by the registry CAS protocol).
+Compaction and reconciliation MUST use a common monotonic transition watermark. The capture boundary is atomic: in one durable transaction, lock/allocate the next transition sequence watermark, create the `sweep_run`/snapshot registry record, record `(snapshot_id, run_id, transition_watermark, captured_at)`, and register all selected members with their expected versions before publishing the snapshot as active. No transition committed after that sequence is a member of the snapshot, and no member may be processed before the active record and watermark commit are visible. Snapshot/watermark membership MUST be durable and visible to compaction: an atomic registry transaction (or equivalent lease/CAS protocol) MUST create the snapshot record, capture `(snapshot_id, transition_watermark, captured_at)`, register each selected row identity and expected `state_version`, and mark the run active before compaction can select candidates. The snapshot owner is the reconciliation/replay run identified by `owner_id`; it MUST heartbeat/renew `lease_expires_at` before each bounded processing batch and before expiry, using CAS on `(snapshot_id, owner_id, fence, status=active)`. Renewal does not change the fence; takeover after expiry increments the snapshot fence and invalidates the old owner. The registry MUST expose active snapshot IDs, owners, fences, watermarks, row membership, lease expiry, and completion/abort state. A run MUST durably CAS `active -> completed` (with owner and fence) only after all members are processed and its report is persisted, or CAS `active -> aborted` with a reason on cancellation/failure. Lease expiry alone never authorizes archive or compaction; an expired snapshot must first be safely fenced and marked aborted (or otherwise removed by the registry CAS protocol).
 
-Compaction MUST atomically verify that registry membership is absent, or that the snapshot is durably `aborted`/`completed` under the current fence; an expired-but-active snapshot is a block, not permission. A process-local list is insufficient. At the start of a reconciliation run, materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
+Every snapshot batch start, snapshot-member mutation, outbox mutation, remote send, archive write, and archive/delete CAS MUST validate `(snapshot_id, owner_id, fence, status=active, lease_expires_at > now)` in the same transaction or immediately before the side effect. A failed validation is a fenced abort: the actor MUST stop the batch, perform no remote send/archive/delete, and emit a run-bound fence-loss event. Lease renewal is not authorization after expiry. Before compaction selects or deletes anything, it MUST detect expired active snapshots, atomically increment/fence them and mark them `aborted` (or complete the equivalent registry takeover CAS); only then may it proceed. An expired-but-active snapshot is never treated as safe by timeout alone.
+
+Compaction MUST atomically verify that registry membership is absent, or that the snapshot is durably `aborted`/`completed` under the current fence; an expired-but-active snapshot is a block, not permission. At the start of a reconciliation run, materialize the eligible row identities, current `state_version`, `mnemosyne_rev`, and category. The snapshot is immutable for that run. Rows or transitions created after the watermark are excluded from that run and MUST be eligible for the next run; the report records the watermark and exclusion count.
 
 Compaction MUST acquire the per-row archival lease (or an equivalent CAS) and archive only rows whose last transition is at or below the compaction watermark, whose state is terminal for compaction, and which are not currently selected by a reconciliation/replay snapshot. The archive marker/deletion CAS MUST include the expected `state_version`; any concurrent transition causes compaction to skip the row and emit `compaction_skip_concurrent_update`. Reconciliation MUST treat an archived row as valid only when the archive manifest contains the same row ID, final state, state version, and digest. Compaction MUST never delete a row that is newer than its snapshot watermark or one that lacks a verified archive record.
 

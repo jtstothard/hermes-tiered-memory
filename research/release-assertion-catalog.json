@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "catalog_id": "issue-8-release-assertions",
+  "version": 1,
+  "status": "contract-only",
+  "gates": [
+    {"id": "bootstrap", "required": true, "assertions": ["bootstrap.sidecar_trusted", "bootstrap.wheel_hash_matches", "bootstrap.payload_allowlist", "bootstrap.activation_symlink"]},
+    {"id": "loader-discovery", "required": true, "assertions": ["loader.discovery.direct_plugin_path", "loader.discovery.registers_composite", "loader.discovery.fresh_process"]},
+    {"id": "duplicate-provider-guard", "required": true, "assertions": ["guard.one_external_provider", "guard.rejects_duplicate_before_operation"]},
+    {"id": "dependency-provenance", "required": true, "assertions": ["deps.lock_hashes_match", "deps.allowed_host", "deps.no_public_fallback"]},
+    {"id": "wheel-install", "required": true, "assertions": ["wheel.install_clean", "wheel.metadata_boundary"]},
+    {"id": "sdist-build-install", "required": true, "assertions": ["sdist.build_clean", "sdist.install_loader_pass"]},
+    {"id": "compatibility", "required": true, "assertions": ["compatibility.interpreter_platform", "compatibility.upstream_pins"]},
+    {"id": "adapter-contract", "required": true, "assertions": ["adapter.contract_pass"]},
+    {"id": "outbox-restart", "required": true, "assertions": ["outbox.restart_recovery"]},
+    {"id": "health-cli", "required": true, "assertions": ["health.status_and_tools", "cli.exit_contract"]},
+    {"id": "rollback", "required": false, "required_from_release": 2, "first_release_exception": "uninstall-disable-recovery-only" , "assertions": ["rollback.restore_invariant"]},
+    {"id": "artifact-authenticity", "required": true, "assertions": ["artifact.tag_verified", "artifact.attestation_verified"]},
+    {"id": "package-content", "required": true, "assertions": ["package.file_list", "package.no_secrets"]}
+  ],
+  "matrix": {
+    "dimensions": ["python", "platform", "artifact_variant"],
+    "tuple_order": ["python", "platform", "artifact_variant"],
+    "tuple_schema": {
+      "python": "exact interpreter version",
+      "platform": "declared OS-architecture tag",
+      "artifact_variant": ["wheel-install", "sdist-build-install"]
+    },
+    "cells_source": "release-manifest",
+    "cells": "explicit ordered list of applicable tuples",
+    "uniqueness": "each tuple appears exactly once; stable cell id is derived from the ordered tuple",
+    "applicability": "include a tuple only when its artifact variant is declared applicable for that exact Python/platform pair; do not infer missing tuples by Cartesian expansion",
+    "cardinality": "count(matrix.cells)",
+    "evidence_rule": "each required gate has exactly one evidence object per listed cell; optional gates are BLOCKED or omitted only under the gate's omission rule",
+    "artifact_reuse": "an immutable artifact hash may occur in multiple cells, but each cell requires independent run-scoped evidence"
+  },
+  "id_rules": {
+    "gate_order": "array order above is normative",
+    "assertion_order": "assertions array order per gate is normative",
+    "matrix_cell_id": "manifest-derived digest of canonical tuple [python, platform, artifact_variant]",
+    "evidence_id": "unique per observation; never reused across gates, cells, or reruns"
+  },
+  "evidence_rules": {
+    "status": ["PASS", "FAIL", "BLOCKED"],
+    "blocked_requires": "non-empty blocker and no promotion to PASS",
+    "observed_assertions": "exactly the expected assertion IDs, once each, in catalog order",
+    "command_provenance": ["run_id", "cwd", "environment_hash", "config_hash", "input_hashes", "source_revision", "resolved_outputs", "redaction_map"],
+    "output_provenance": ["command_id", "run_id", "cwd", "environment_hash", "config_hash", "input_hashes", "source_revision", "resolved_path", "output_sha256"],
+    "redaction_map": "canonical entries plus policy/version metadata and SHA-256 hash; redaction never silently changes the assertion input",
+    "deterministic_reuse": "only immutable content-addressed outputs with matching complete provenance may be reused, and reuse_of must identify the original run and output"
+  }
+}

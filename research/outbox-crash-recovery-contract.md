@@ -48,6 +48,8 @@ outbox
   created_at      INTEGER NOT NULL
   updated_at      INTEGER NOT NULL
 
+`operation_attempt` is append-only and MUST additionally enforce `UNIQUE(row_id/outbox_id, retry_cycle_no, attempt_no)` as the durable attempt slot; duplicate allocation is rejected/audited and never sends remotely. `transition_audit` MUST include a durable monotonic `transition_seq` allocated transactionally from a per-bank/profile `transition_sequence` row. The durable per-document `document_ordering(document_id PRIMARY KEY, ordering_version, eligible_revision, terminal_revision, terminal_outcome, owner_id, fence)` ledger is the serialization point for newer revisions. `sweep_run(run_id PRIMARY KEY, cadence_slot UNIQUE, owner_id, fence, lease_expires_at, status, transition_watermark, quota_policy_version, audit_scope, alert_scope)` owns each automatic sweep. Issue #6 defines the complete columns, foreign keys, and CAS semantics for these records.
+
 UNIQUE(document_id, mnemosyne_rev)          -- idempotency constraint
 INDEX(status, next_retry_at)                -- drain worker query
 ```
@@ -80,14 +82,21 @@ The budget is **five total remote attempts**, numbered `attempt_no=1..5`, not fi
 - Same `(document_id, mnemosyne_rev)` already `promoted` → drain skips it (completed duplicate).
 - `mnemosyne_rev` incremented → genuine update, re-promote via Hindsight `replace` (deletes prior document, processes new).
 - Enforced by the `UNIQUE(document_id, mnemosyne_rev)` constraint: a duplicate enqueue within the same transaction is an upsert/no-op, not an error.
+- The ordering ledger is authoritative: enqueueing a newer revision records it as waiting unless it is the ledger's current `eligible_revision`; terminal outcome of the older revision and advancement of `ordering_version`/next eligibility are one owner/fence/CAS transaction. A worker that cannot acquire the current ledger and row fences MUST NOT submit the newer revision. This preserves ordering across restart and concurrent workers; a process-local queue or scan is not sufficient.
 
+### 7.1 Durable transition and attempt allocation
+
+Every state/lease/fence transition allocates one `transition_seq` from the durable sequence row and writes the transition audit in the same transaction. The sequence is monotonic for committed transitions and is not generated in memory. Before remote send, the worker atomically claims the `(outbox_id, retry_cycle_no, attempt_no)` slot and persists the operation ID plus `in_flight` transition. A uniqueness conflict is a duplicate-attempt rejection: audit it with the existing attempt ID, do not send, and reconcile the existing attempt. Outcome, ordering advancement, and local transition/audit remain one CAS transaction.
 ### 8. Permanent failure — quarantine, halt only that document, leave L1 intact
 
 A `quarantined` row records `last_error`, `last_http_status`, and `attempt_no=5` (or the terminal-failure attempt number), plus its `retry_cycle_no`. The drain continues processing other documents — a permanent failure on one record never blocks the queue. The L1 (Mnemosyne) entry that produced the quarantined promotion **remains valid** — the memory is stored at L1; only L2 promotion is blocked pending reconciliation.
 
 ### 9. Reconciliation — periodic sweep (30 min) + CLI command
 
-- **Periodic sweep:** the drain thread/reconciliation service re-attempts `quarantined` rows on a 30-minute cadence (longer than the retry backoff) so transient-then-fixed failures self-heal. It performs the Issue #6 `automatic_reconciliation_retry` CAS transition, increments `retry_cycle_no`, resets `attempt_no` to zero, and re-enters the five-total-attempt worker cycle; if it fails all five again, it returns to `quarantined` with a new state version and linked warning lineage.
+- **Periodic sweep:** before inspecting rows, the reconciliation service claims one durable `sweep_run` for the cadence slot using owner/lease/fence CAS. A live unexpired run prevents overlap; the skipped trigger records `sweep_overlap_skipped` against the active `run_id`. An expired run is fenced and marked aborted before replacement. The run ID is bound to its snapshot, transition watermark, quota policy, every retry transition/audit, alert, metric, and final report; cadence alone is not an identity. The run lease is renewed before every bounded batch and before expiry, and completion is persisted by owner/fence CAS.
+- The sweep re-attempts `quarantined` rows on a 30-minute cadence. It performs the Issue #6 `automatic_reconciliation_retry` CAS transition, increments `retry_cycle_no`, resets `attempt_no` to zero, and re-enters the five-total-attempt worker cycle; if it fails all five again, it returns to `quarantined` with a new state version and linked warning lineage.
+- Every snapshot batch/member mutation, outbox mutation, remote send, and archive operation performed under the sweep MUST validate the current `(snapshot_id, owner_id, fence, status=active, lease_expires_at > now)` immediately before the side effect. Fence loss or expiry aborts the batch and forbids the side effect. Before compaction, an expired active snapshot MUST be atomically fenced and marked aborted; expiry alone never permits archive/delete.
+
 - **CLI command** (`hermes <provider> reconcile` or equivalent): this is only the Issue #6 `authorized_operator_replay` interface, never a third retry path. It MUST use authenticated replay authorization, default dry-run, explicit mutation confirmation, immutable target snapshot/hash, per-item state/revision/fence CAS, async operation-ID/status lookup, the same five-total-attempt budget and ordering rules, bounded target/rate/time/concurrency limits, deterministic skip reasons, and durable audit/alert semantics defined by Issue #6 §1.3 and §4. It reports promoted/quarantined/still-failing/skipped/rate-limited counts. An unauthorized or unconfirmed CLI request changes no row state.
 
 The periodic sweep means a genuinely-permanent-permanent row is retried every 30 min indefinitely — this is **accepted** as the cost of self-healing. The sweep is quiet (no alert) unless a row crosses a high **sweep-cycle** threshold (configurable; default 10 sweep cycles = ~5 hours), at which point it surfaces as a persistent-failure alert.
