@@ -1,0 +1,121 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-tiered-memory"
+version = "0.1.0"
+description = "Production composite Hermes memory provider with Mnemosyne L1 and Hindsight L2"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = {text = "MIT"}
+authors = [
+    {name = "Jay Stothard", email = "jtstothard@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "cryptography>=41.0.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+mnemosyne = [
+    "mnemosyne>=3.14.0,<4.0.0",
+]
+hindsight = [
+    "hindsight-client>=0.8.6,<1.0.0",
+]
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "freezegun>=1.2.0",
+    "responses>=0.23.0",
+]
+dev = [
+    "hermes-tiered-memory[mnemosyne,hindsight,test]",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+    "black>=23.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jtstothard/hermes-tiered-memory"
+Repository = "https://github.com/jtstothard/hermes-tiered-memory"
+Documentation = "https://github.com/jtstothard/hermes-tiered-memory/blob/main/README.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hermes_tiered_memory*"]
+
+[tool.setuptools.package-data]
+hermes_tiered_memory = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/contract"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --cov=hermes_tiered_memory --cov-report=term-missing --cov-report=html"
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests (no external services)",
+    "contract: Contract tests (deterministic, no live services)",
+]
+
+[tool.coverage.run]
+source = ["hermes_tiered_memory"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = []
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312", "py313"]
