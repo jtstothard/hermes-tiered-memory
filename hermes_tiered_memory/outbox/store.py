@@ -31,6 +31,7 @@ class TerminalOutcome(str, Enum):
     CONFIRMED_PERMANENT = "confirmed_permanent"
     AUTOMATIC_RETRY_QUARANTINE = "automatic_retry_quarantine"
     UNRESOLVED_OUTCOME_QUARANTINE = "unresolved_outcome_quarantine"
+    STALE_SUPERSEDED = "stale_superseded"
 
 
 @dataclass
@@ -333,6 +334,22 @@ class OutboxStore:
             return None
         return OutboxItem.from_dict(dict(row))
 
+    def latest_delete_revision(self, document_id: str) -> int | None:
+        """Return the newest durable delete revision for a document.
+
+        Only counts deletes that have been successfully promoted to L2 (state='promoted').
+        Pending or in-flight deletes are not durable and must not block upserts.
+        """
+        conn = self._get_connection()
+        row = conn.execute(
+            """SELECT MAX(mnemosyne_rev) FROM outbox
+               WHERE document_id = ?
+                 AND state = 'promoted'
+                 AND json_extract(metadata_snapshot, '$.operation') = 'delete'""",
+            (document_id,),
+        ).fetchone()
+        return int(row[0]) if row is not None and row[0] is not None else None
+
     def claim_batch(
         self,
         batch_size: int,
@@ -343,19 +360,28 @@ class OutboxStore:
         """
         Claim a batch of pending items for processing.
         Returns the claimed items with leases.
+
+        To prevent batch-size window gaps that could resurrect deleted content,
+        if any item is claimed for a document, ALL pending items for that
+        document (both deletes and upserts) are also claimed in the same batch,
+        even if this exceeds batch_size.
         """
         now = int(time.time())
         lease_expires_at = now + lease_duration_seconds
 
         conn = self._get_connection()
 
-        # Select and claim pending items in a transaction
+        # First, select and claim pending items with deletes ordered before upserts
         cursor = conn.execute(
             """
             SELECT row_id FROM outbox
             WHERE state = 'pending'
               AND (next_retry_at IS NULL OR next_retry_at <= ?)
-            ORDER BY row_id
+            ORDER BY document_id,
+                     CASE WHEN json_extract(metadata_snapshot, '$.operation') = 'delete'
+                          THEN 0 ELSE 1 END,
+                     mnemosyne_rev,
+                     row_id
             LIMIT ?
             """,
             (now, batch_size),
@@ -364,6 +390,31 @@ class OutboxStore:
         row_ids = [row[0] for row in cursor.fetchall()]
         if not row_ids:
             return []
+
+        # Get the set of documents that have items in this batch
+        affected_documents = set()
+        for row_id in row_ids:
+            if row_id is None:
+                continue
+            item = self.get(row_id)
+            if item:
+                affected_documents.add(item.document_id)
+
+        # For affected documents, claim ALL pending items (both deletes and upserts)
+        if affected_documents:
+            placeholders = ",".join(["?" for _ in affected_documents])
+            cursor = conn.execute(
+                f"""
+                SELECT row_id FROM outbox
+                WHERE state = 'pending'
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                  AND document_id IN ({placeholders})
+                  AND row_id NOT IN ({",".join(["?" for _ in row_ids])})
+                """,
+                (now, *affected_documents, *row_ids),
+            )
+            additional_row_ids = [row[0] for row in cursor.fetchall()]
+            row_ids.extend(additional_row_ids)
 
         # Claim each item
         items = []
