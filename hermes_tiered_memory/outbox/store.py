@@ -114,7 +114,14 @@ class OutboxItem:
 
 
 class OutboxStore:
-    """Durable SQLite-based outbox store with crash recovery."""
+    """Durable SQLite-based outbox store with crash recovery.
+
+    OutboxStore uses SQLite's rollback journal (``DELETE``) unconditionally.
+    This is also the policy required when the database is attached to the L1
+    database: SQLite cannot provide crash-atomic commits across an ATTACH
+    topology while the attached database uses WAL.  Existing WAL databases
+    are rejected rather than changed underneath another process/connection.
+    """
 
     SCHEMA_VERSION = 1
 
@@ -123,7 +130,6 @@ class OutboxStore:
         self.db_path = db_path
         self._local = threading.local()
         self._lock = threading.Lock()
-        self._atomic_journal_mode = False
 
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,20 +140,34 @@ class OutboxStore:
     def _get_connection(self) -> sqlite3.Connection:
         """Get a thread-local connection."""
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(
-                self.db_path, check_same_thread=False
-            )
-            self._local.conn.row_factory = sqlite3.Row
-            if not self._atomic_journal_mode:
-                # WAL is retained for standalone outbox operation.  When this
-                # database is attached to SQLite L1, the adapter switches it to
-                # DELETE before the shared transaction; ATTACH crash atomicity is
-                # only established for the rollback-journal topology.
-                self._local.conn.execute("PRAGMA journal_mode=WAL")
-            else:
-                self._local.conn.execute("PRAGMA journal_mode=DELETE")
-            self._local.conn.execute("PRAGMA foreign_keys=ON")
+            connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            try:
+                connection.row_factory = sqlite3.Row
+                self._ensure_delete_journal(connection)
+                connection.execute("PRAGMA foreign_keys=ON")
+            except BaseException:
+                connection.close()
+                raise
+            self._local.conn = connection
         return self._local.conn
+
+    @staticmethod
+    def _ensure_delete_journal(connection: sqlite3.Connection) -> None:
+        """Enforce the one journal policy without stealing another owner.
+
+        A WAL file may have live readers/writers that this instance cannot
+        observe or quiesce.  Refusing it is safer than silently switching the
+        file back to DELETE and invalidating an active topology.
+        """
+        current = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if current == "wal":
+            raise RuntimeError(
+                "OutboxStore database uses WAL; refusing to change an existing "
+                "database without proven global quiescence"
+            )
+        mode = str(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
+        if mode != "delete":
+            raise RuntimeError(f"OutboxStore requires DELETE journal mode, got {mode!r}")
 
     def _initialize_schema(self) -> None:
         """Initialize the outbox schema."""
@@ -214,21 +234,13 @@ class OutboxStore:
         # normal OutboxStore connection creates the worker index separately.
 
     def prepare_for_atomic_attach(self, connection: sqlite3.Connection, schema: str = "outbox") -> None:
-        """Use rollback journaling for an ATTACH transaction.
+        """Validate the already-established policy on an attached database.
 
-        SQLite's multi-database atomic commit protocol is not established when
-        an attached database remains in WAL mode.  This deliberately changes
-        the outbox file's persistent journal mode only for the concrete L1
-        atomic topology; standalone OutboxStore connections still default to
-        WAL for their existing behavior.
+        No connection is closed here.  Thread-local connections belong to
+        their owning threads, and closing only the caller's connection cannot
+        establish global quiescence for this store or other store instances.
         """
-        # Release the standalone connection's WAL/read handles before changing
-        # the persistent journal mode through the attaching connection.
-        if hasattr(self._local, "conn"):
-            self._local.conn.close()
-            delattr(self._local, "conn")
-        self._atomic_journal_mode = True
-        mode = connection.execute(f'PRAGMA "{schema}".journal_mode=DELETE').fetchone()[0]
+        mode = connection.execute(f'PRAGMA "{schema}".journal_mode').fetchone()[0]
         if str(mode).lower() != "delete":
             raise RuntimeError(f"attached outbox journal mode is {mode!r}, expected 'delete'")
 

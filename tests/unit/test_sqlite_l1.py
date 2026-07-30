@@ -35,6 +35,58 @@ def test_atomic_l1_outbox_success_and_shared_topology(tmp_path):
     outbox.close()
 
 
+def test_outbox_uses_delete_for_standalone_and_second_instance(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    path = tmp_path / "outbox.db"
+    first = OutboxStore(path)
+    assert first._get_connection().execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    second = OutboxStore(path)
+    assert second._get_connection().execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    first.close()
+    second.close()
+
+
+def test_atomic_configuration_accepts_preopened_store_connection_from_other_thread(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    ready = threading.Event()
+
+    def preopen():
+        outbox._get_connection().execute("SELECT 1")
+        ready.set()
+
+    thread = threading.Thread(target=preopen)
+    thread.start()
+    assert ready.wait(5)
+    thread.join()
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    l1.configure_atomic_outbox(outbox)
+    record = l1.remember_with_outbox(
+        "thread-safe", {}, document_id_factory=lambda _: "thread-safe-doc",
+        promotion_metadata_factory=lambda record: record.metadata, outbox_store=outbox,
+    )
+    assert outbox.get_by_identity("thread-safe-doc", record.revision) is not None
+    l1.close()
+    outbox.close()
+
+
+def test_existing_wal_outbox_is_rejected_without_conversion(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    path = tmp_path / "outbox.db"
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    connection.close()
+    with pytest.raises(RuntimeError, match="uses WAL"):
+        OutboxStore(path)
+    check = sqlite3.connect(path)
+    assert check.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    check.close()
+
+
 def test_atomic_outbox_insert_failure_rolls_back_l1_and_is_reusable(tmp_path):
     from hermes_tiered_memory.outbox.store import OutboxStore
 
