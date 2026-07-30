@@ -158,6 +158,23 @@ def test_injected_row_factory_is_preserved(tmp_path):
     connection.close()
 
 
+def test_injected_mapping_row_factory_supports_schema_initialization(tmp_path):
+    def as_dict(cursor, row):
+        return {column[0]: value for column, value in zip(cursor.description, row)}
+
+    connection = sqlite3.connect(tmp_path / "l1.db")
+    connection.row_factory = as_dict
+    adapter = SQLiteL1Adapter(connection=connection)
+    assert connection.row_factory is as_dict
+    record = adapter.remember("mapping row", {"kind": "test"})
+    restored = adapter.get(record.source_id)
+    assert restored is not None
+    assert restored.content == "mapping row"
+    adapter.close()
+    assert connection.row_factory is as_dict
+    connection.close()
+
+
 def test_sqlite_l1_contract_recall_forget_revision_health_and_hard_delete(tmp_path):
     adapter = SQLiteL1Adapter(tmp_path / "l1.db")
     first, second = adapter.remember_batch([("alpha", {"n": 1}), ("beta", {})])

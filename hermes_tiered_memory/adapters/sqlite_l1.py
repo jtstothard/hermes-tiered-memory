@@ -32,6 +32,13 @@ _SCHEMA_COLUMNS = (
 )
 
 
+def _row_value(row: Any, key: str, index: int) -> Any:
+    """Read a SQLite row regardless of the connection's row factory shape."""
+    if isinstance(row, Mapping):
+        return row[key]
+    return row[index]
+
+
 class SQLiteL1Adapter(L1Adapter):
     """Concrete durable L1 adapter backed by one serialized SQLite connection.
 
@@ -94,7 +101,8 @@ class SQLiteL1Adapter(L1Adapter):
     def _initialize_schema(self) -> None:
         with self._lock:
             self._ensure_open()
-            version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+            version_row = self._connection.execute("PRAGMA user_version").fetchone()
+            version = int(_row_value(version_row, "user_version", 0))
             exists = self._connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'l1_records'"
             ).fetchone()
@@ -121,7 +129,13 @@ class SQLiteL1Adapter(L1Adapter):
                     """
                 )
                 columns = tuple(
-                    (row[1], row[2], row[3], row[4], row[5])
+                    tuple(_row_value(row, key, index) for key, index in (
+                        ("name", 1),
+                        ("type", 2),
+                        ("notnull", 3),
+                        ("dflt_value", 4),
+                        ("pk", 5),
+                    ))
                     for row in connection.execute("PRAGMA table_info(l1_records)").fetchall()
                 )
                 if columns != _SCHEMA_COLUMNS:
