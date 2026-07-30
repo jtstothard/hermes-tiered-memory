@@ -17,11 +17,11 @@ This ticket depends on:
 
 The outbox enqueue is tied to the L1 (Mnemosyne) write in a single SQLite transaction. A crash between commit and enqueue cannot drop a promotion. The coupling means a full disk or corrupt outbox table blocks L1 writes too — this is **accepted**: never losing a promotion is the higher guarantee.
 
-### 2. Storage — separate WAL-mode SQLite file, attached for the atomic transaction
+### 2. Storage — separate rollback-journal SQLite file, attached for the atomic transaction
 
-A dedicated outbox SQLite file lives in the same bank directory as the Mnemosyne L1 database. It is `ATTACH`-ed to the L1 connection so both writes commit in one transaction. We own the outbox schema (idempotency key, retry counters, state, error log); Mnemosyne owns its tables. WAL journal mode (`PRAGMA journal_mode=WAL`) for crash recovery and concurrent read by the drain worker. Same bank directory = same backup boundary as L1.
+A dedicated outbox SQLite file lives in the same bank directory as the Mnemosyne L1 database. It is `ATTACH`-ed to the L1 connection so both writes commit in one transaction. We own the outbox schema (idempotency key, retry counters, state, error log). Rollback journal mode (`PRAGMA journal_mode=DELETE`) is the single OutboxStore policy for both standalone and attached connections; this sacrifices the former standalone WAL behavior in exchange for a topology that preserves ATTACH crash atomicity. Same bank directory = same backup boundary as L1.
 
-Crash recovery: WAL-mode SQLite recovers automatically on open; the drain-on-restart replay (§6) handles any rows left `pending` by a torn write.
+Crash recovery: rollback-journal SQLite recovers automatically on open; the drain-on-restart replay (§6) handles any rows left `pending` by a torn write.
 
 ### 3. Outbox table schema (design, not SQL)
 
@@ -159,4 +159,4 @@ The operator surface reports:
 
 ## Concise recommendation for issue #4
 
-Atomic L1+outbox commit via ATTACH; separate WAL file per bank dir; five-total-attempt exponential backoff; append-only operation/transition history with lease/fence/CAS recovery; background drain thread + drain-on-restart; logical enqueue identity by `(document_id, mnemosyne_rev)` with multiple durable attempts; caller operation IDs and provider status lookup for retry safety; explicit durable `uncertain` recovery; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via the Issue #6 automatic 30-minute path; and CLI replay only through Issue #6's authorized operator path. Queue-drained is separate from operationally healthy, and metadata wire fidelity is an explicit publish gate. Every decision confirmed with Jay during the grilling session.
+Atomic L1+outbox commit via ATTACH; separate rollback-journal file per bank dir; five-total-attempt exponential backoff; append-only operation/transition history with lease/fence/CAS recovery; background drain thread + drain-on-restart; logical enqueue identity by `(document_id, mnemosyne_rev)` with multiple durable attempts; caller operation IDs and provider status lookup for retry safety; explicit durable `uncertain` recovery; quarantine on permanent failure (halt only that document, L1 intact); reconciliation via the Issue #6 automatic 30-minute path; and CLI replay only through Issue #6's authorized operator path. Queue-drained is separate from operationally healthy, and metadata wire fidelity is an explicit publish gate. Every decision confirmed with Jay during the grilling session.

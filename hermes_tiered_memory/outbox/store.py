@@ -114,7 +114,14 @@ class OutboxItem:
 
 
 class OutboxStore:
-    """Durable SQLite-based outbox store with crash recovery."""
+    """Durable SQLite-based outbox store with crash recovery.
+
+    OutboxStore uses SQLite's rollback journal (``DELETE``) unconditionally.
+    This is also the policy required when the database is attached to the L1
+    database: SQLite cannot provide crash-atomic commits across an ATTACH
+    topology while the attached database uses WAL.  Existing WAL databases
+    are rejected rather than changed underneath another process/connection.
+    """
 
     SCHEMA_VERSION = 1
 
@@ -133,13 +140,34 @@ class OutboxStore:
     def _get_connection(self) -> sqlite3.Connection:
         """Get a thread-local connection."""
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(
-                self.db_path, check_same_thread=False
-            )
-            self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA foreign_keys=ON")
+            connection = sqlite3.connect(self.db_path, check_same_thread=False)
+            try:
+                connection.row_factory = sqlite3.Row
+                self._ensure_delete_journal(connection)
+                connection.execute("PRAGMA foreign_keys=ON")
+            except BaseException:
+                connection.close()
+                raise
+            self._local.conn = connection
         return self._local.conn
+
+    @staticmethod
+    def _ensure_delete_journal(connection: sqlite3.Connection) -> None:
+        """Enforce the one journal policy without stealing another owner.
+
+        A WAL file may have live readers/writers that this instance cannot
+        observe or quiesce.  Refusing it is safer than silently switching the
+        file back to DELETE and invalidating an active topology.
+        """
+        current = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if current == "wal":
+            raise RuntimeError(
+                "OutboxStore database uses WAL; refusing to change an existing "
+                "database without proven global quiescence"
+            )
+        mode = str(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).lower()
+        if mode != "delete":
+            raise RuntimeError(f"OutboxStore requires DELETE journal mode, got {mode!r}")
 
     def _initialize_schema(self) -> None:
         """Initialize the outbox schema."""
@@ -179,6 +207,59 @@ class OutboxStore:
         """
         )
         conn.commit()
+
+    def initialize_schema_on(self, connection: sqlite3.Connection, schema: str = "main") -> None:
+        """Create the owned outbox schema on an existing connection, without commit."""
+        qualified = f'"{schema}".outbox'
+        connection.execute(f"""
+            CREATE TABLE IF NOT EXISTS {qualified} (
+                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                mnemosyne_id TEXT NOT NULL,
+                mnemosyne_rev INTEGER NOT NULL,
+                content_snapshot TEXT NOT NULL,
+                metadata_snapshot TEXT NOT NULL,
+                state TEXT NOT NULL,
+                state_version INTEGER NOT NULL,
+                terminal_outcome TEXT NOT NULL DEFAULT 'none',
+                owner_id TEXT, lease_id TEXT, lease_expires_at INTEGER,
+                fence INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER,
+                attempt_no INTEGER NOT NULL DEFAULT 0, retry_cycle_no INTEGER NOT NULL DEFAULT 0,
+                quarantine_origin_at INTEGER, last_error_class TEXT, last_http_status INTEGER,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                UNIQUE(document_id, mnemosyne_rev)
+            )
+        """)
+        # The unique identity constraint is sufficient for this write slice. The
+        # normal OutboxStore connection creates the worker index separately.
+
+    def prepare_for_atomic_attach(self, connection: sqlite3.Connection, schema: str = "outbox") -> None:
+        """Validate the already-established policy on an attached database.
+
+        No connection is closed here.  Thread-local connections belong to
+        their owning threads, and closing only the caller's connection cannot
+        establish global quiescence for this store or other store instances.
+        """
+        mode = connection.execute(f'PRAGMA "{schema}".journal_mode').fetchone()[0]
+        if str(mode).lower() != "delete":
+            raise RuntimeError(f"attached outbox journal mode is {mode!r}, expected 'delete'")
+
+    def enqueue_on(self, connection: sqlite3.Connection, *, schema: str = "main",
+                   document_id: str, mnemosyne_id: str, mnemosyne_rev: int,
+                   content: str, metadata: dict[str, Any]) -> int:
+        """Insert without committing; the caller owns the transaction."""
+        now = int(time.time())
+        cursor = connection.execute(
+            f'''INSERT INTO "{schema}".outbox (
+                document_id, mnemosyne_id, mnemosyne_rev, content_snapshot,
+                metadata_snapshot, state, state_version, terminal_outcome,
+                fence, attempt_no, retry_cycle_no, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (document_id, mnemosyne_id, mnemosyne_rev, content,
+             json.dumps(metadata, separators=(",", ":")), OutboxState.PENDING.value,
+             0, TerminalOutcome.NONE.value, 0, 0, 0, now, now),
+        )
+        return int(cursor.lastrowid)
 
     def enqueue(
         self,
