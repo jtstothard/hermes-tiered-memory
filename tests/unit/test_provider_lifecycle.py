@@ -41,7 +41,7 @@ def test_registration_fails_closed_when_hermes_api_is_unavailable(monkeypatch):
     monkeypatch.delitem(sys.modules, "agent.memory_provider", raising=False)
     context = Mock()
 
-    with pytest.raises(RuntimeError, match="API is unavailable"):
+    with pytest.raises(RuntimeError, match="API is unavailable|does not implement the pinned Hermes MemoryProvider API"):
         package.register(context)
 
     context.register_memory_provider.assert_not_called()
