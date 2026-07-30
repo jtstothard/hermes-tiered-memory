@@ -130,3 +130,53 @@ def test_directory_config_is_rejected(tmp_path):
     config.mkdir()
     with pytest.raises(ProtectedConfigValidationError, match="regular file"):
         ProtectedConfigLoader(config).load()
+
+
+@pytest.mark.parametrize("path_kind", ["config", "signature", "replay"])
+def test_protected_paths_reject_symlinks(tmp_path, path_kind):
+    real = tmp_path / "real"
+    real.write_bytes(b"not trusted")
+    config, signature = _write_signed_config(tmp_path, _config())
+    replay = tmp_path / "replay-state"
+    replay.write_text('{"config_id":"x","sequence":1,"digest":"x"}')
+    target = {"config": config, "signature": signature, "replay": replay}[path_kind]
+    link = tmp_path / f"{path_kind}-link"
+    target.unlink()
+    link.symlink_to(real)
+    paths = {
+        "config": (link, signature),
+        "signature": (config, link),
+        "replay": (config, signature),
+    }
+    with pytest.raises(ProtectedConfigValidationError, match="symlink"):
+        ProtectedConfigLoader(*paths[path_kind], replay_state_path=link if path_kind == "replay" else None).load()
+
+
+@pytest.mark.parametrize("field", ["sequence", "port"])
+def test_bool_is_not_accepted_as_integer(field, tmp_path):
+    data = _config()
+    if field == "sequence":
+        data["sequence"] = True
+    else:
+        data["hindsight"]["port"] = True
+    path, signature = _write_signed_config(tmp_path, data)
+    with pytest.raises(ProtectedConfigValidationError):
+        ProtectedConfigLoader(path, signature).load()
+
+
+def test_bool_replay_sequence_is_rejected(tmp_path):
+    path, signature = _write_signed_config(tmp_path, _config())
+    replay = tmp_path / "replay.json"
+    replay.write_text('{"config_id":"x","sequence":true,"digest":"x"}')
+    with pytest.raises(ProtectedConfigValidationError):
+        ProtectedConfigLoader(path, signature, replay).load()
+
+
+def test_unsupported_numeric_canonicalization_is_rejected(tmp_path):
+    data = _config()
+    data["sequence"] = 1.0
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="floating-point"):
+        ProtectedConfigLoader(path).load()

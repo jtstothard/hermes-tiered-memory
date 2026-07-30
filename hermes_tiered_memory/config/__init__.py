@@ -114,13 +114,19 @@ class ProtectedConfigLoader:
 
     def _validate_file(self, path: pathlib.Path, must_exist: bool = True) -> None:
         """Validate file permissions and ownership."""
-        if must_exist and not path.exists():
+        # Reject links before existence checks, stat calls, or reads.
+        try:
+            path_stat = path.lstat()
+        except FileNotFoundError:
+            path_stat = None
+        if path_stat is not None and stat.S_ISLNK(path_stat.st_mode):
+            raise ProtectedConfigValidationError(f"Protected config path is a symlink: {path}")
+        if must_exist and path_stat is None:
             raise ProtectedConfigValidationError(f"Protected config file does not exist: {path}")
-
-        if not path.exists():
+        if path_stat is None:
             return
 
-        stat_result = path.stat()
+        stat_result = path_stat
 
         if not stat.S_ISREG(stat_result.st_mode):
             raise ProtectedConfigValidationError(f"Protected config path is not a regular file: {path}")
@@ -140,7 +146,12 @@ class ProtectedConfigLoader:
             raise ProtectedConfigValidationError(f"Protected config file is not readable: {path}")
 
     def _load_jcs_json(self, path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
-        """Load and validate JCS JSON (RFC 8785) from file."""
+        """Load the strict canonical JSON subset used for signed configs.
+
+        Full RFC 8785 number canonicalization is not claimed: no JCS
+        dependency is available. Floats and non-finite numbers are rejected.
+        """
+        self._validate_file(path, must_exist=True)
         content = path.read_bytes()
         try:
             text = content.decode("utf-8")
@@ -156,14 +167,26 @@ class ProtectedConfigLoader:
             return result
 
         try:
-            data = json.loads(text, object_pairs_hook=object_pairs_hook)
+            data = json.loads(text, object_pairs_hook=object_pairs_hook, parse_constant=lambda value: (_ for _ in ()).throw(ProtectedConfigValidationError(f"Unsupported non-finite number {value} in {path}")))
         except json.JSONDecodeError as e:
             raise ProtectedConfigValidationError(f"Invalid JSON in {path}: {e}")
 
         if not isinstance(data, dict):
             raise ProtectedConfigValidationError("Protected config root must be an object")
 
-        # Re-serialize to canonical compact, sorted JSON bytes.
+        def reject_float(value: Any) -> Any:
+            if type(value) is float:
+                raise ProtectedConfigValidationError(f"Unsupported floating-point number in {path}")
+            if isinstance(value, dict):
+                return {key: reject_float(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [reject_float(item) for item in value]
+            return value
+
+        data = reject_float(data)
+
+        # Restricted canonical compact, sorted JSON; full RFC 8785 numeric
+        # canonicalization is intentionally not claimed without a JCS library.
         raw_bytes = json.dumps(
             data, separators=(",", ":"), sort_keys=True, ensure_ascii=False
         ).encode("utf-8")
@@ -178,7 +201,7 @@ class ProtectedConfigLoader:
         self._validate_file(self.replay_state_path)
         try:
             state = json.loads(self.replay_state_path.read_bytes().decode("utf-8"))
-            if not isinstance(state, dict) or not isinstance(state.get("config_id"), str) or not isinstance(state.get("sequence"), int) or not isinstance(state.get("digest"), str):
+            if (not isinstance(state, dict) or set(state) != {"config_id", "sequence", "digest"} or not isinstance(state.get("config_id"), str) or type(state.get("sequence")) is not int or not isinstance(state.get("digest"), str)):
                 raise ValueError("invalid replay state shape")
             self._last_config_id = state["config_id"]
             self._accepted_sequence = state["sequence"]
@@ -190,8 +213,14 @@ class ProtectedConfigLoader:
         parent = self.replay_state_path.parent
         parent.mkdir(parents=True, exist_ok=True)
         temporary = self.replay_state_path.with_name(f".{self.replay_state_path.name}.tmp")
+        self._validate_file(self.replay_state_path, must_exist=False)
+        self._validate_file(temporary, must_exist=False)
         payload = json.dumps({"config_id": config.config_id, "sequence": config.sequence, "digest": config.payload_digest}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         try:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(payload)
@@ -204,7 +233,7 @@ class ProtectedConfigLoader:
             finally:
                 os.close(dir_fd)
         finally:
-            if temporary.exists():
+            if temporary.exists() and not temporary.is_symlink():
                 temporary.unlink()
 
     def _parse_timestamp(self, value: str) -> datetime:
@@ -234,14 +263,18 @@ class ProtectedConfigLoader:
         if missing:
             raise ProtectedConfigValidationError(f"Missing required fields: {missing}")
 
+        unknown = set(data) - required_fields
+        if unknown:
+            raise ProtectedConfigValidationError(f"Unsupported config fields: {unknown}")
+
         # Validate schema_version
-        if data["schema_version"] != 1:
+        if type(data["schema_version"]) is not int or data["schema_version"] != 1:
             raise ProtectedConfigValidationError(
                 f"Unsupported schema_version: {data['schema_version']}"
             )
 
         # Validate sequence is positive integer
-        if not isinstance(data["sequence"], int) or data["sequence"] <= 0:
+        if type(data["sequence"]) is not int or data["sequence"] <= 0:
             raise ProtectedConfigValidationError(f"Invalid sequence: {data['sequence']}")
 
         # Validate timestamps
@@ -265,12 +298,16 @@ class ProtectedConfigLoader:
                 f"Missing required hindsight fields: {missing_hindsight}"
             )
 
+        unknown_hindsight = set(hindsight) - required_hindsight_fields
+        if unknown_hindsight:
+            raise ProtectedConfigValidationError(f"Unsupported hindsight fields: {unknown_hindsight}")
+
         # Validate scheme
         if hindsight["scheme"] != "https":
             raise ProtectedConfigValidationError(f"Invalid scheme: {hindsight['scheme']}")
 
         # Validate port
-        if not isinstance(hindsight["port"], int) or not (1 <= hindsight["port"] <= 65535):
+        if type(hindsight["port"]) is not int or not (1 <= hindsight["port"] <= 65535):
             raise ProtectedConfigValidationError(f"Invalid port: {hindsight['port']}")
 
         # Validate base_path starts with /
@@ -281,11 +318,15 @@ class ProtectedConfigLoader:
 
         # Validate TLS config
         tls = hindsight["tls"]
+        if not isinstance(tls, dict) or set(tls) != {"verify", "ca_file"}:
+            raise ProtectedConfigValidationError("Unsupported or invalid tls fields")
         if not isinstance(tls.get("verify"), bool):
             raise ProtectedConfigValidationError(f"Invalid tls.verify: {tls.get('verify')}")
 
         # Validate proxy config
         proxy = hindsight["proxy"]
+        if not isinstance(proxy, dict) or set(proxy) != {"enabled"}:
+            raise ProtectedConfigValidationError("Unsupported or invalid proxy fields")
         if not isinstance(proxy.get("enabled"), bool):
             raise ProtectedConfigValidationError(f"Invalid proxy.enabled: {proxy.get('enabled')}")
 
