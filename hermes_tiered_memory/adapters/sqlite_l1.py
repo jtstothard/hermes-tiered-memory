@@ -212,17 +212,18 @@ class SQLiteL1Adapter(L1Adapter):
         with self._lock:
             self._ensure_open()
             row = self._connection.execute(
-                "SELECT revision FROM l1_records WHERE source_id = ?", (source_id,)
+                "SELECT revision AS revision FROM l1_records WHERE source_id = ?", (source_id,)
             ).fetchone()
-            return int(row[0]) if row is not None else None
+            return int(_row_value(row, "revision", 0)) if row is not None else None
 
     def health(self) -> dict[str, Any]:
         with self._lock:
             if self._closed:
                 return {"status": "closed"}
-            count = self._connection.execute(
-                "SELECT COUNT(*) FROM l1_records WHERE is_deleted = 0"
-            ).fetchone()[0]
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS record_count FROM l1_records WHERE is_deleted = 0"
+            ).fetchone()
+            count = _row_value(row, "record_count", 0)
             return {"status": "healthy", "record_count": count}
 
     def close(self) -> None:

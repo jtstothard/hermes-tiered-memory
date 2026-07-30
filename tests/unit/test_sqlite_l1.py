@@ -170,6 +170,8 @@ def test_injected_mapping_row_factory_supports_schema_initialization(tmp_path):
     restored = adapter.get(record.source_id)
     assert restored is not None
     assert restored.content == "mapping row"
+    assert adapter.get_revision(record.source_id) == 1
+    assert adapter.health() == {"status": "healthy", "record_count": 1}
     adapter.close()
     assert connection.row_factory is as_dict
     connection.close()
