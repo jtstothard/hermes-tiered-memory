@@ -11,7 +11,11 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hermes_tiered_memory.outbox.store import OutboxStore
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,7 +70,62 @@ class SQLiteL1Adapter(L1Adapter):
         self._connection = connection
         self._lock = threading.RLock()
         self._closed = False
+        self._attached_outbox_schema: str | None = None
         self._initialize_schema()
+
+    def configure_atomic_outbox(self, outbox_store: "OutboxStore") -> None:
+        """Attach the outbox DB using rollback journals for atomic commits."""
+        with self._lock:
+            self._ensure_open()
+            if self._attached_outbox_schema is not None:
+                raise RuntimeError("atomic outbox is already configured")
+            attached = False
+            try:
+                self._connection.execute("ATTACH DATABASE ? AS outbox", (str(outbox_store.db_path),))
+                attached = True
+                outbox_store.prepare_for_atomic_attach(self._connection, "outbox")
+                outbox_store.initialize_schema_on(self._connection, "outbox")
+                self._connection.commit()
+                self._attached_outbox_schema = "outbox"
+            except BaseException:
+                self._rollback()
+                if attached:
+                    try:
+                        self._connection.execute("DETACH DATABASE outbox")
+                    except sqlite3.DatabaseError:
+                        pass
+                raise
+
+    @property
+    def supports_atomic_outbox(self) -> bool:
+        return self._attached_outbox_schema is not None
+
+    def remember_with_outbox(self, content: str, metadata: dict[str, Any], *,
+                             document_id_factory: Callable[[str], str],
+                             promotion_metadata_factory: Callable[[L1Record], dict[str, Any]],
+                             outbox_store: "OutboxStore") -> L1Record:
+        """Store L1 and its promotion row in one ATTACH transaction.
+
+        The provider supplies the promotion envelope through a callback; this
+        adapter does not depend on provider metadata-building internals.
+        """
+        self._validate_metadata(metadata)
+        if not self.supports_atomic_outbox:
+            raise RuntimeError("SQLite L1 adapter has no configured atomic outbox")
+        source_id = f"sqlite-l1-{uuid.uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        with self.transaction() as connection:
+            metadata_json = json.dumps(metadata, separators=(",", ":"))
+            connection.execute(
+                "INSERT INTO l1_records (source_id, revision, content, metadata, created_at, updated_at, is_deleted) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (source_id, 1, content, metadata_json, now.isoformat(), now.isoformat(), 0),
+            )
+            record = L1Record(source_id, 1, content, metadata, now, now, False)
+            outbox_store.enqueue_on(connection, schema="outbox", document_id=document_id_factory(source_id),
+                                    mnemosyne_id=source_id, mnemosyne_rev=1,
+                                    content=content, metadata=promotion_metadata_factory(record))
+        return record
 
     @property
     def connection(self) -> sqlite3.Connection:

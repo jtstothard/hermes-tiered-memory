@@ -225,7 +225,24 @@ class CompositeProvider:
             logger.warning("L1 adapter not initialized")
             raise RuntimeError("L1 adapter not initialized")
 
-        # Synchronously write to L1
+        # Concrete SQLite L1 uses the shared ATTACH transaction. Other adapters
+        # retain their isolated injection behavior and are not advertised atomic.
+        from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+        if isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
+            if not self.l1_adapter.supports_atomic_outbox:
+                self.l1_adapter.configure_atomic_outbox(self.outbox_store)
+            try:
+                l1_record = self.l1_adapter.remember_with_outbox(
+                    content, metadata, document_id_factory=self._generate_document_id,
+                    promotion_metadata_factory=self._build_promotion_metadata,
+                    outbox_store=self.outbox_store
+                )
+            except Exception as e:
+                logger.exception(f"Atomic L1/outbox write error: {e}")
+                raise RuntimeError(f"L1/outbox write failed: {e}") from e
+            return self._l1_record_to_dict(l1_record)
+
+        # Isolated adapters use the historical two-step behavior.
         try:
             l1_record = self.l1_adapter.remember(content, metadata)
             logger.info(
@@ -256,6 +273,10 @@ class CompositeProvider:
             except Exception as e:
                 logger.exception(f"Outbox enqueue error: {e}")
                 # Don't fail the request if enqueue fails - L1 is durable
+
+        # Configure the concrete SQLite adapter for the shared ATTACH transaction.
+        if self.l1_adapter and isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
+            self.l1_adapter.configure_atomic_outbox(self.outbox_store)
 
         return self._l1_record_to_dict(l1_record)
 
