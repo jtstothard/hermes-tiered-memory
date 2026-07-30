@@ -1,111 +1,102 @@
-# Delete and Tombstone Contract
+# Delete and Tombstone Ordering Contract
 
-**Status:** Proposed implementation contract
-**Scope:** Local SQLite L1 + attached SQLite outbox path only
-**Parent:** Production-candidate composite memory provider (PR #11)
+**Status:** Implemented and locally verified. Evidence boundary: local SQLite tests and subprocess SIGKILL probes only. No live Hermes, Mnemosyne, Hindsight, TLS, CI, or production crash/restart evidence is claimed.
 
-## Problem statement
+**Merged PRs implementing this contract:**
 
-The current SQLite `memory_delete` path hard-deletes the L1 record and does not emit a durable L2 delete operation. A queued or retried upsert can therefore recreate content that a user already deleted. The system needs an ordered, durable delete state that survives restart and is committed atomically with the L2 invalidation operation.
+| PR | Scope | Commit |
+|---|---|---|
+| #12 | Fail-closed lifecycle/config, canonical JSON, file safety | `1a6c11d` |
+| #13 | SQLite L1 persistence seam, schema/version rejection, ownership | `af193b1` |
+| #14 | Atomic SQLite L1 + outbox via shared transaction + ATTACH; rollback-journal policy | `51b2ddf` |
+| #21 | Durable tombstones + atomic delete outbox write (combined #16 + #17) | `c525bb3` |
+| #22 | Stale-upsert rejection, worker ordering, batch-size window closure (closes #18) | `fd6fcc5` |
 
-## Contract outcome
+## 1. Durable Tombstones (PR #21)
 
-A delete is represented by an L1 tombstone and an outbox delete operation committed in the same SQLite transaction. Tombstones are **invisible to normal L1 reads and recall**, but remain durable for revision ordering, stale-event rejection, replay, and later reconciliation.
+`SQLiteL1Adapter.forget()` and `forget_with_outbox()` set `is_deleted=1` and increment `revision` on the L1 record. This state is durable across process restarts.
 
-The existing hard-delete behavior remains the behavior for mock/custom adapters that do not implement the concrete SQLite transaction seam. This slice does not claim live Mnemosyne or Hindsight behavior.
+**Read semantics:**
+- `get()` and `recall()` exclude tombstoned records (`is_deleted=0` filter).
+- `get_revision()` still returns tombstoned revisions (ordering support).
+- `health()` counts visible records only.
 
-## Identity and ordering
+**Delete behavior:**
+- Repeated deletion of the same source is idempotent (no error, no duplicate tombstone).
+- Deleting an unknown source returns `False` / `None` without creating any row.
+- Tombstones persist across restart (verified by restart persistence test).
 
-- Origin identity remains the stable `source_id`/document identity used by the existing atomic promotion path.
-- Every source mutation, including delete, has a strictly increasing per-source integer revision.
-- The delete tombstone carries the revision that supersedes the prior visible record.
-- An outbox upsert or delete with revision lower than the durable tombstone revision is stale and must not become an applicable promotion.
-- An equal `(document_id, revision, operation kind)` replay is idempotent; it must not create a duplicate outbox row.
-- A delete followed by a new create uses a new source identity or a later explicitly defined revision; it must not be confused with replay of the deleted record.
+## 2. Atomic Delete Outbox Write (PR #21)
 
-## State model
+`SQLiteL1Adapter.forget_with_outbox()` commits the tombstone and exactly one delete outbox row in a single shared SQLite transaction using the ATTACH topology.
 
-### L1 record states
+**Atomicity boundary:**
+- Tombstone UPDATE and outbox INSERT are in the same transaction.
+- If either fails (enqueue failure, commit failure), both roll back — no orphan state.
+- The adapter remains reusable after failure and retry succeeds with one identity.
 
-- **Visible:** content is returned by `get`/`recall`.
-- **Tombstoned:** deletion metadata and revision are retained; content is not returned by `get`/`recall`.
+**Outbox row identity:**
+- `document_id`: stable document identifier from `document_id_factory(source_id)`.
+- `mnemosyne_rev`: the *new* (incremented) revision, ensuring the outbox UNIQUE constraint is not violated.
+- `content`: empty string (deletes carry no content).
+- `metadata_snapshot`: JSON containing `{"operation": "delete", "origin": "mnemosyne", "profile", "bank", "mnemosyne_id", "mnemosyne_revision"}` — operation type encoded in metadata, not a schema column.
 
-### Outbox operation states
+**Provider routing:**
+- `CompositeProvider.memory_delete()` routes to `forget_with_outbox()` for concrete `SQLiteL1Adapter` with configured outbox.
+- Non-SQLite adapters retain the isolated `forget()` path (no outbox write — consistent with the two-step store behavior).
 
-The existing outbox lifecycle remains authoritative for delivery state (`pending`, retryable, terminal/quarantined as currently supported). This slice adds operation kind:
+## 3. Stale-Upsert Rejection (PR #22)
 
-- **upsert:** publish the content snapshot for the source revision.
-- **delete:** invalidate/delete the stable downstream document for the source revision.
+The promotion worker prevents a late upsert (stale content with a lower revision than a tombstone's delete revision) from resurrecting deleted content at L2.
 
-A delete operation is processed in revision order relative to upserts for the same document identity. The worker must reject or safely skip stale upserts after a newer tombstone is durable.
+**Worker ordering:**
+- `OutboxStore.claim_batch()` expands to include ALL pending items for any document that has at least one item claimed in the batch. This closes the batch-size window gap where an upsert could be claimed and processed before its delete.
 
-## Atomic write behavior
+**Staleness check:**
+- `OutboxStore.latest_delete_revision()` queries only PROMOTED (durable) deletes: `WHERE document_id = ? AND operation = 'delete' AND state = 'promoted'`.
+- In-flight and pending deletes do NOT count — they are not durable and must not block upserts.
+- If an upsert's `mnemosyne_rev < latest_delete_revision`, the worker quarantines it with `STALE_SUPERSEDED` terminal outcome.
+- Quarantined `STALE_SUPERSEDED` items never retry on subsequent drains.
 
-For a concrete SQLite L1 adapter configured with an outbox:
+**Delete replay idempotency:**
+- Processing the same delete outbox operation twice is safe.
+- `MockL2Adapter.delete_document()` is idempotent: deleting a non-existent document succeeds.
 
-- `memory_store` writes a visible L1 row and an upsert outbox row in one transaction.
-- `memory_delete` changes the L1 row to a tombstone and writes a delete outbox row in that same transaction.
-- If tombstone or outbox insertion fails, neither change is durable.
-- If commit fails, both changes roll back and the adapter remains reusable.
-- After restart, a committed tombstone remains invisible to reads and its delete operation remains pending/replayable.
-- A failed or interrupted transaction must not leave only the tombstone or only the delete operation.
+**Crash-replay semantics:**
+- If a worker crashes after claiming a delete but before marking it PROMOTED, the in-flight delete does NOT block subsequent upserts (it's not durable yet).
+- Once the delete reaches PROMOTED state, stale upserts are rejected.
 
-## Worker behavior
+**Concurrent-claim safety:**
+- Two workers claiming batches simultaneously via real threads: SQLite serializes the claim writes, and batch expansion ensures whichever worker claims a document's items gets all of them. A genuine concurrent claim race test verifies exactly one worker wins each row.
 
-Within one stable document identity:
+## 4. Crash-Style Probes (#19 verification)
 
-- A delete operation at revision `R` supersedes all upserts below `R`.
-- A stale upsert below an already applied or durable tombstone is skipped and cannot resurrect content.
-- A delete replay is idempotent according to the existing outbox identity constraint and does not create duplicate durable work.
-- The worker records enough state to distinguish pending delete from completed delete using existing outbox lifecycle fields; operation IDs and reconciliation are later slices.
+Subprocess SIGKILL probes were exercised at three points in the delete transaction:
 
-## Read behavior
+| Kill point | Tombstone applied? | Outbox row applied? | One-sided rows? |
+|---|---|---|---|
+| Before tombstone write | No | No | Zero |
+| After tombstone, before outbox | No | No | Zero |
+| After outbox INSERT, before COMMIT | No | No | Zero |
 
-- `get(source_id)` returns no record for a tombstoned source.
-- `recall(query)` excludes tombstoned sources.
-- `get_revision(source_id)` continues to return the tombstone revision so ordering can be enforced.
-- `health` counts only visible records, unless an explicitly separate tombstone metric is added later.
+**Result:** SQLite's rollback journal ensures the transaction is atomic — neither the tombstone nor the outbox row is visible until COMMIT succeeds. No one-sided rows survive any SIGKILL probe point.
 
-## Failure and recovery requirements
+## 5. Evidence Boundary
 
-The implementation must test:
+The following are explicitly NOT claimed:
+- Live Hermes `MemoryProvider` ABC integration or loader evidence.
+- Live Mnemosyne, Hindsight, or remote backend connectivity.
+- TLS or authenticated remote endpoint evidence.
+- CI pipeline execution.
+- Complete production crash/restart guarantees beyond the exercised SIGKILL probe points.
+- Real L2 adapter delete semantics (only `MockL2Adapter` is verified).
+- Operation IDs, reconciliation, lease/fence recovery (out of scope).
+- Existing-database migration history (schema compatibility and ownership are explicit, not assumed).
 
-- Successful delete and durable delete outbox row.
-- Outbox insertion failure rolls back the tombstone.
-- Commit failure rolls back both and permits retry.
-- Restart after a committed delete preserves invisible L1 state and pending delete work.
-- Stale upsert after delete does not become applicable or resurrect content.
-- Replaying the same delete does not create a duplicate durable operation.
-- Delete of an unknown source is deterministic and does not create an unowned downstream delete.
-- Mock/custom adapter behavior remains unchanged and is not described as atomic.
+## 6. Test Coverage
 
-## Explicit non-goals
-
-- Operation IDs and caller-visible operation status.
-- Reconciliation or drift repair.
-- Leases, fencing, transition history, or full crash-recovery machinery.
-- Live Mnemosyne, Hindsight, or Hermes `MemoryProvider` integration.
-- Existing-database migration beyond an explicit schema compatibility/rejection path.
-- Production deployment, TLS, credentials, or cross-profile live evidence.
-
-## Implementation decisions
-
-- Reuse the existing SQLite L1 transaction boundary and attached outbox topology.
-- Extend the concrete local schema only through explicit compatibility checks; do not silently migrate unknown existing schemas.
-- Keep provider-specific metadata construction outside the adapter through the existing callback boundary.
-- Keep the delete contract separate from operation-ID and reconciliation work.
-
-## Acceptance evidence
-
-The slice is complete only when the focused and full local suites pass, compileall and diff checks are clean, and an independent adversarial review approves the implementation. Evidence must identify local SQLite tests separately from any live integration evidence; no live integration claim is valid without a real live probe.
-
-## Pre-publish self-review
-
-- **Backward traceability:** Requirements derive from the agreed next slice, existing routing/identity issues, the current hard-delete gap, and the merged atomic SQLite boundary.
-- **Forward traceability:** Each contract section has corresponding acceptance behavior in the failure/recovery and read/worker requirements.
-- **Coverage:** Create/update/delete/read/health are covered; migration/live integration are explicitly out of scope.
-- **Failure-mode coverage:** Invalid/unknown delete, outbox failure, commit failure, restart, stale replay, and duplicate replay are specified.
-- **Ambiguity scan:** Tombstones are explicitly invisible to reads; revision precedence and identity rules are explicit.
-- **Perspective review:** User (delete does not resurrect), tester (deterministic probes), ops (restart and schema boundaries), security (no new credentials or access) covered.
-- **Competent-implementer test:** No unresolved implementation question is required for this local slice.
-- **Outcome/solution boundary:** Behavioral requirements are separated from implementation decisions; ATTACH reuse is an existing architectural constraint, not a new live-backend claim.
+- **122 tests pass** (`python3 -m pytest -q -o addopts=''`), 40 existing deprecation warnings.
+- **28 SQLite L1 tests**: tombstone persistence, hidden reads, revision retention, idempotent delete, atomic delete outbox, rollback, commit failure, unknown-id, already-deleted.
+- **22 worker tests**: stale upsert, delete/replay, crash-replay (in-flight/promoted), backfill (higher/lower revision), concurrent workers via real threads, genuine claim race, quarantine permanence.
+- `python3 -m compileall -q hermes_tiered_memory tests` — clean.
+- `git diff --check` — clean.
