@@ -1,8 +1,8 @@
 """SQLite-backed L1 persistence boundary.
 
-This is a local, non-live Mnemosyne seam.  It intentionally does not provide
-atomic outbox writes.  Tombstones and delete ordering belong to a later slice;
-``forget`` therefore uses hard delete here.
+This is a local, non-live Mnemosyne seam.  Deletion is represented by a
+durable tombstone in the concrete SQLite adapter; mock/custom adapters retain
+their existing behavior.
 """
 
 from __future__ import annotations
@@ -126,6 +126,47 @@ class SQLiteL1Adapter(L1Adapter):
                                     mnemosyne_id=source_id, mnemosyne_rev=1,
                                     content=content, metadata=promotion_metadata_factory(record))
         return record
+
+    def forget_with_outbox(self, source_id: str, *,
+                           document_id_factory: Callable[[str], str],
+                           delete_metadata_factory: Callable[[str, int], dict[str, Any]],
+                           outbox_store: "OutboxStore") -> int | None:
+        """Delete (tombstone) L1 and enqueue delete outbox row in one ATTACH transaction.
+
+        Returns the new revision on success, or None if the record was not found or already deleted.
+        """
+        if not self.supports_atomic_outbox:
+            raise RuntimeError("SQLite L1 adapter has no configured atomic outbox")
+        now = datetime.now(timezone.utc)
+        with self.transaction() as connection:
+            # UPDATE l1_records SET is_deleted=1, revision=revision+1, updated_at=now WHERE source_id=? AND is_deleted=0
+            cursor = connection.execute(
+                "UPDATE l1_records SET is_deleted=1, revision=revision+1, updated_at=? "
+                "WHERE source_id=? AND is_deleted=0",
+                (now.isoformat(), source_id),
+            )
+            # If no row updated, return None (unknown or already-deleted)
+            if cursor.rowcount == 0:
+                return None
+            # Read the new revision from the updated row
+            row = connection.execute(
+                "SELECT revision FROM l1_records WHERE source_id=?",
+                (source_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            new_revision = int(_row_value(row, "revision", 0))
+            # Call outbox_store.enqueue_on with delete metadata
+            outbox_store.enqueue_on(
+                connection,
+                schema="outbox",
+                document_id=document_id_factory(source_id),
+                mnemosyne_id=source_id,
+                mnemosyne_rev=new_revision,
+                content="",
+                metadata=delete_metadata_factory(source_id, new_revision)
+            )
+            return new_revision
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -251,10 +292,20 @@ class SQLiteL1Adapter(L1Adapter):
             return [self._row_to_record(row, cursor.description) for row in cursor.fetchall()]
 
     def forget(self, source_id: str) -> bool:
-        # Hard delete is intentional for this prerequisite seam.  Tombstones and
-        # cross-tier delete ordering are deferred to the later outbox slice.
         with self.transaction() as connection:
-            cursor = connection.execute("DELETE FROM l1_records WHERE source_id = ?", (source_id,))
+            row = connection.execute(
+                "SELECT revision, is_deleted FROM l1_records WHERE source_id = ?", (source_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            revision = int(_row_value(row, "revision", 0))
+            if bool(_row_value(row, "is_deleted", 1)):
+                return True
+            cursor = connection.execute(
+                "UPDATE l1_records SET revision = ?, updated_at = ?, is_deleted = 1 "
+                "WHERE source_id = ? AND is_deleted = 0",
+                (revision + 1, datetime.now(timezone.utc).isoformat(), source_id),
+            )
             return cursor.rowcount > 0
 
     def get(self, source_id: str) -> L1Record | None:
@@ -262,7 +313,7 @@ class SQLiteL1Adapter(L1Adapter):
             self._ensure_open()
             cursor = self._connection.execute(
                 "SELECT source_id, revision, content, metadata, created_at, updated_at, is_deleted "
-                "FROM l1_records WHERE source_id = ?", (source_id,)
+                "FROM l1_records WHERE source_id = ? AND is_deleted = 0", (source_id,)
             )
             row = cursor.fetchone()
             return self._row_to_record(row, cursor.description) if row is not None else None

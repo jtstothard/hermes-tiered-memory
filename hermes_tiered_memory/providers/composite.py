@@ -274,10 +274,6 @@ class CompositeProvider:
                 logger.exception(f"Outbox enqueue error: {e}")
                 # Don't fail the request if enqueue fails - L1 is durable
 
-        # Configure the concrete SQLite adapter for the shared ATTACH transaction.
-        if self.l1_adapter and isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
-            self.l1_adapter.configure_atomic_outbox(self.outbox_store)
-
         return self._l1_record_to_dict(l1_record)
 
     def memory_delete(self, memory_id: str) -> bool:
@@ -286,13 +282,33 @@ class CompositeProvider:
 
         Implements tombstone semantics:
         1. Delete/tombstone from L1 synchronously
-        2. Enqueue L2 deletion asynchronously
+        2. Enqueue L2 deletion asynchronously (atomic for SQLiteL1Adapter with configured outbox)
         """
         if not self.l1_adapter:
             logger.warning("L1 adapter not initialized")
             return False
 
-        # Synchronously delete from L1
+        # Concrete SQLite L1 uses the shared ATTACH transaction. Other adapters
+        # retain their isolated injection behavior and are not advertised atomic.
+        from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+        if isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
+            if not self.l1_adapter.supports_atomic_outbox:
+                self.l1_adapter.configure_atomic_outbox(self.outbox_store)
+            try:
+                new_revision = self.l1_adapter.forget_with_outbox(
+                    memory_id, document_id_factory=self._generate_document_id,
+                    delete_metadata_factory=self._build_delete_metadata,
+                    outbox_store=self.outbox_store
+                )
+                logger.info(
+                    f"Atomic L1 delete: source_id={memory_id}, new_revision={new_revision}"
+                )
+                return new_revision is not None
+            except Exception as e:
+                logger.exception(f"Atomic L1/outbox delete error: {e}")
+                raise RuntimeError(f"L1/outbox delete failed: {e}") from e
+
+        # Isolated adapters use the historical two-step behavior.
         try:
             deleted = self.l1_adapter.forget(memory_id)
             logger.info(f"L1 delete: source_id={memory_id}, success={deleted}")
@@ -303,15 +319,36 @@ class CompositeProvider:
         # Enqueue L2 deletion (asynchronous)
         if deleted and self.outbox_store:
             try:
-                # For deletion, we create a tombstone entry
                 document_id = self._generate_document_id(memory_id)
-                # The worker would handle this as a delete operation
-                # For now, we'll just log it
-                logger.info(f"L2 delete enqueued: document_id={document_id}")
+                delete_metadata = self._build_delete_metadata(memory_id, self.l1_adapter.get_revision(memory_id) or 0)
+
+                self.outbox_store.enqueue(
+                    document_id=document_id,
+                    mnemosyne_id=memory_id,
+                    mnemosyne_rev=self.l1_adapter.get_revision(memory_id) or 0,
+                    content="",
+                    metadata=delete_metadata,
+                )
+                logger.info(
+                    f"L2 delete enqueued: document_id={document_id}, "
+                    f"mnemosyne_id={memory_id}"
+                )
             except Exception as e:
                 logger.exception(f"L2 delete enqueue error: {e}")
+                # Don't fail the request if enqueue fails - L1 is durable
 
         return deleted
+
+    def _build_delete_metadata(self, source_id: str, revision: int) -> dict[str, Any]:
+        """Build the metadata envelope for L2 deletion."""
+        return {
+            "operation": "delete",
+            "origin": "mnemosyne",
+            "profile": self.active_profile_identity,
+            "bank": self._get_bank_id(),
+            "mnemosyne_id": source_id,
+            "mnemosyne_revision": revision,
+        }
 
     def close(self) -> None:
         """Close the provider and release resources."""
