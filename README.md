@@ -1,24 +1,21 @@
-# Hermes Tiered Memory — Production Composite Provider
+# Hermes Tiered Memory — Composite Provider Prototype
 
-A production composite Hermes memory provider that combines Mnemosyne L1 (local SQLite hot cache) with Hindsight L2 (durable PostgreSQL/pgvector memory).
+A fail-closed composite-provider prototype for a future Hermes integration. It is not a production Hermes memory provider and does not claim live Mnemosyne or Hindsight compatibility.
 
 ## Scope and Status
 
-This implementation provides the production composite Hermes memory provider, deterministic unit/contract tests, and developer documentation. It implements the contracts defined in `issues/` and `research/`.
+This package contains the current composite-provider prototype, deterministic unit/contract tests, and developer documentation. It does not yet provide a usable pinned-Hermes `MemoryProvider` implementation or live adapter integration.
 
 **What is included:**
-- One Hermes-facing provider/tool namespace
-- Mnemosyne L1 synchronous writes and cache-first reads
-- Hindsight L2 retain/retain_batch_async promotion (no reflect dependency)
-- Durable local outbox with operation_id/idempotency, per-item status/checkpoint, bounded retry, quarantine/replay hooks, crash-safe recovery
-- L2 miss fallback and backfill
-- Profile/bank isolation
-- Metadata provenance envelope
-- Tombstone/delete semantics
-- Configurable adapters and retention
+- Internal composite prototype with deterministic mock-adapter tests
+- Protected endpoint configuration validation and fail-closed startup checks
+- Fail-closed registration when the pinned Hermes API boundary is unavailable
 - No bundled dependencies or Hermes core changes
 
-**What is explicitly NOT included (follow-up gaps):**
+**What is explicitly NOT included:**
+- A usable Hermes `MemoryProvider` implementation or live registration
+- Live Mnemosyne/Hindsight adapter routes or compatibility evidence
+- Outbox operation IDs, tombstones, or replay implementation
 - Live integration tests with pinned Hermes/Mnemosyne/Hindsight services
 - Packaging and signing
 - Security evidence (TLS trust, OpenAPI route verification)
@@ -204,13 +201,12 @@ This implementation follows the contracts defined in:
 - `research/hindsight-native-semantics-proof.md` — Hindsight API
 - `research/live-adapter-contract.md` — Adapter interface
 
-## Safety Guarantees
+## Safety Boundary
 
-1. **Never lose a promotion** — Atomic L1+outbox commit
-2. **Never block the queue** — Quarantine halts only failing documents
-3. **Never silently drop** — Every unresolved row durably represented
-4. **Never trust teardown for durability** — Outbox written at write time
-5. **Never retry permanent errors indefinitely** — Quarantine on permanent failure
+The package fails closed rather than registering the current prototype as a
+Hermes provider. Protected configuration is required at startup and must be
+valid, signed, and fresh. The prototype's adapter/outbox behavior is not a
+claim of live Hermes or service compatibility.
 
 ## Limitations
 

@@ -259,18 +259,12 @@ class ProtectedConfigLoader:
         if now > config.expires_at + timedelta(seconds=self.CLOCK_SKEW_SECONDS):
             raise ProtectedConfigFreshnessError(f"Config has expired: {config.expires_at}")
 
-        # Check sequence is strictly increasing (for same config_id)
+        # A loader instance is single-use for a config stream.  Equal sequence
+        # numbers are replays, even when the payload is byte-for-byte equal.
         if self._accepted_sequence is not None and config.config_id == self._last_config_id:
-            if config.sequence < self._accepted_sequence:
+            if config.sequence <= self._accepted_sequence:
                 raise ProtectedConfigFreshnessError(
-                    f"Config sequence {config.sequence} is less than accepted {self._accepted_sequence}"
-                )
-            if (
-                config.sequence == self._accepted_sequence
-                and config.payload_digest != self._accepted_digest
-            ):
-                raise ProtectedConfigFreshnessError(
-                    f"Config sequence {config.sequence} changed payload without incrementing sequence"
+                    f"Config sequence {config.sequence} was already accepted"
                 )
 
     def _validate_signature(
@@ -278,10 +272,6 @@ class ProtectedConfigLoader:
     ) -> None:
         """Validate the signature over the payload."""
         if signature_data is None:
-            # In production, signature is required
-            # For testing, we allow unsigned configs if keys are not registered
-            if not self._pinned_keys:
-                return
             raise ProtectedConfigAuthError("Signature is required")
 
         # Check key is authorized
