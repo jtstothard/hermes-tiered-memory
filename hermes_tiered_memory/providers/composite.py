@@ -101,8 +101,10 @@ class CompositeProvider:
         signature_path = tiered_config.get("protected_config", {}).get("signature", {}).get("path")
 
         if not protected_config_path:
-            logger.warning("No protected configuration path specified")
-            return
+            raise RuntimeError(
+                "Protected Hindsight configuration path is required; "
+                "composite provider startup aborted"
+            )
 
         try:
             loader = ProtectedConfigLoader(
@@ -116,8 +118,10 @@ class CompositeProvider:
             )
         except Exception as e:
             logger.error(f"Failed to load protected configuration: {e}")
-            # For now, we'll allow initialization to continue with a degraded state
-            # In production, this should be a fatal error
+            raise RuntimeError(
+                "Protected Hindsight configuration is invalid; "
+                "composite provider startup aborted"
+            ) from e
 
     def _initialize_l1(self) -> None:
         """Initialize the L1 (Mnemosyne) adapter."""
