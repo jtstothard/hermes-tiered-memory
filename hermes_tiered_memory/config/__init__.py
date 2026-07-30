@@ -277,7 +277,10 @@ class ProtectedConfigLoader:
         if type(data["sequence"]) is not int or data["sequence"] <= 0:
             raise ProtectedConfigValidationError(f"Invalid sequence: {data['sequence']}")
 
-        # Validate timestamps
+        # Validate timestamps are strings before parsing
+        for field in ["issued_at", "not_before", "expires_at"]:
+            if not isinstance(data[field], str):
+                raise ProtectedConfigValidationError(f"Invalid {field}: expected string, got {type(data[field]).__name__}")
         data["issued_at_parsed"] = self._parse_timestamp(data["issued_at"])
         data["not_before_parsed"] = self._parse_timestamp(data["not_before"])
         data["expires_at_parsed"] = self._parse_timestamp(data["expires_at"])
@@ -290,6 +293,10 @@ class ProtectedConfigLoader:
 
         # Validate hindsight config
         hindsight = data["hindsight"]
+        if not isinstance(hindsight, dict):
+            raise ProtectedConfigValidationError(
+                f"Invalid hindsight: expected object, got {type(hindsight).__name__}"
+            )
         required_hindsight_fields = {"scheme", "host", "port", "base_path", "tls", "proxy"}
 
         missing_hindsight = required_hindsight_fields - set(hindsight.keys())
@@ -302,7 +309,11 @@ class ProtectedConfigLoader:
         if unknown_hindsight:
             raise ProtectedConfigValidationError(f"Unsupported hindsight fields: {unknown_hindsight}")
 
-        # Validate scheme
+        # Validate scheme is a string
+        if not isinstance(hindsight["scheme"], str):
+            raise ProtectedConfigValidationError(
+                f"Invalid scheme: expected string, got {type(hindsight['scheme']).__name__}"
+            )
         if hindsight["scheme"] != "https":
             raise ProtectedConfigValidationError(f"Invalid scheme: {hindsight['scheme']}")
 
@@ -310,7 +321,11 @@ class ProtectedConfigLoader:
         if type(hindsight["port"]) is not int or not (1 <= hindsight["port"] <= 65535):
             raise ProtectedConfigValidationError(f"Invalid port: {hindsight['port']}")
 
-        # Validate base_path starts with /
+        # Validate base_path is a string and starts with /
+        if not isinstance(hindsight["base_path"], str):
+            raise ProtectedConfigValidationError(
+                f"Invalid base_path: expected string, got {type(hindsight['base_path']).__name__}"
+            )
         if not hindsight["base_path"].startswith("/"):
             raise ProtectedConfigValidationError(
                 f"Invalid base_path (must start with /): {hindsight['base_path']}"

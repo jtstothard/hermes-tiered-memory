@@ -180,3 +180,43 @@ def test_unsupported_numeric_canonicalization_is_rejected(tmp_path):
     path.chmod(0o600)
     with pytest.raises(ProtectedConfigValidationError, match="floating-point"):
         ProtectedConfigLoader(path).load()
+
+
+def test_hindsight_null_is_rejected(tmp_path):
+    data = _config()
+    data["hindsight"] = None
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="expected object"):
+        ProtectedConfigLoader(path).load()
+
+
+def test_hindsight_list_is_rejected(tmp_path):
+    data = _config()
+    data["hindsight"] = []
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="expected object"):
+        ProtectedConfigLoader(path).load()
+
+
+def test_issued_at_as_int_is_rejected(tmp_path):
+    data = _config()
+    data["issued_at"] = 1234567890
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="issued_at.*expected string"):
+        ProtectedConfigLoader(path).load()
+
+
+def test_base_path_as_int_is_rejected(tmp_path):
+    data = _config()
+    data["hindsight"]["base_path"] = 12345
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(data, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    path.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="base_path.*expected string"):
+        ProtectedConfigLoader(path).load()
