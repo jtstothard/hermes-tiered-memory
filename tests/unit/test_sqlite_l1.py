@@ -390,7 +390,7 @@ def test_injected_mapping_row_factory_supports_schema_initialization(tmp_path):
     connection.close()
 
 
-def test_sqlite_l1_contract_recall_forget_revision_health_and_hard_delete(tmp_path):
+def test_sqlite_l1_tombstone_is_invisible_but_retains_revision(tmp_path):
     adapter = SQLiteL1Adapter(tmp_path / "l1.db")
     first, second = adapter.remember_batch([("alpha", {"n": 1}), ("beta", {})])
     assert {record.content for record in adapter.recall("a")} == {"alpha", "beta"}
@@ -398,9 +398,35 @@ def test_sqlite_l1_contract_recall_forget_revision_health_and_hard_delete(tmp_pa
     assert adapter.health() == {"status": "healthy", "record_count": 2}
     assert adapter.forget(first.source_id) is True
     assert adapter.get(first.source_id) is None
-    assert adapter.get_revision(first.source_id) is None
+    assert adapter.get_revision(first.source_id) == 2
+    assert adapter.recall("alpha") == []
     assert adapter.health() == {"status": "healthy", "record_count": 1}
+    assert adapter.forget(first.source_id) is True
+    assert adapter.get_revision(first.source_id) == 2
     adapter.close()
+
+
+def test_sqlite_l1_unknown_delete_is_deterministic_and_creates_no_row(tmp_path):
+    adapter = SQLiteL1Adapter(tmp_path / "l1.db")
+    assert adapter.forget("does-not-exist") is False
+    assert adapter.get_revision("does-not-exist") is None
+    assert adapter.health() == {"status": "healthy", "record_count": 0}
+    adapter.close()
+
+
+def test_sqlite_l1_tombstone_survives_restart(tmp_path):
+    db_path = tmp_path / "l1.db"
+    first = SQLiteL1Adapter(db_path)
+    record = first.remember("restartable", {"kind": "test"})
+    assert first.forget(record.source_id) is True
+    first.close()
+
+    second = SQLiteL1Adapter(db_path)
+    assert second.get(record.source_id) is None
+    assert second.recall("restartable") == []
+    assert second.get_revision(record.source_id) == 2
+    assert second.health() == {"status": "healthy", "record_count": 0}
+    second.close()
 
 
 def test_batch_is_atomic_and_metadata_is_validated(tmp_path):
@@ -445,3 +471,246 @@ def test_mock_l1_injection_path_remains_unchanged():
     from hermes_tiered_memory.adapters.l1 import L1Adapter
 
     assert issubclass(MockL1Adapter, L1Adapter)
+
+
+def test_atomic_forget_outbox_success(tmp_path):
+    """Tombstone + delete outbox row both committed; outbox item has operation:'delete' in metadata, correct revision, empty content."""
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    # First, create a record
+    record = l1.remember_with_outbox(
+        "to-delete", {"kind": "test"},
+        document_id_factory=lambda source_id: "doc-to-delete",
+        promotion_metadata_factory=lambda record: {"kind": record.metadata["kind"]},
+        outbox_store=outbox
+    )
+    assert l1.get(record.source_id) is not None
+    assert l1.get_revision(record.source_id) == 1
+
+    # Now delete it atomically
+    def doc_id_factory(source_id):
+        return f"doc-{source_id}"
+
+    def delete_meta_factory(source_id, revision):
+        return {
+            "operation": "delete",
+            "origin": "mnemosyne",
+            "profile": "test-profile",
+            "bank": "test-bank",
+            "mnemosyne_id": source_id,
+            "mnemosyne_revision": revision,
+        }
+
+    new_revision = l1.forget_with_outbox(
+        record.source_id,
+        document_id_factory=doc_id_factory,
+        delete_metadata_factory=delete_meta_factory,
+        outbox_store=outbox
+    )
+
+    # Verify tombstone applied
+    assert new_revision == 2
+    assert l1.get(record.source_id) is None  # get() filters is_deleted=0
+    assert l1.get_revision(record.source_id) == 2  # revision incremented
+    assert l1.recall("to-delete") == []
+
+    # Verify outbox row created
+    outbox_item = outbox.get_by_identity(doc_id_factory(record.source_id), 2)
+    assert outbox_item is not None
+    assert outbox_item.mnemosyne_id == record.source_id
+    assert outbox_item.mnemosyne_rev == 2
+    assert outbox_item.content_snapshot == ""  # empty content for delete
+    assert outbox_item.state.name == "PENDING"
+
+    # Verify metadata has operation:"delete"
+    metadata = json.loads(outbox_item.metadata_snapshot)
+    assert metadata["operation"] == "delete"
+    assert metadata["mnemosyne_id"] == record.source_id
+    assert metadata["mnemosyne_revision"] == 2
+
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_forget_outbox_failure_rolls_back(tmp_path):
+    """Outbox enqueue fails → tombstone is NOT applied, revision unchanged, adapter is reusable."""
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    # Create a record
+    record = l1.remember_with_outbox(
+        "fail-delete", {},
+        document_id_factory=lambda source_id: "doc-fail",
+        promotion_metadata_factory=lambda record: record.metadata,
+        outbox_store=outbox
+    )
+    assert l1.get_revision(record.source_id) == 1
+
+    # Mock outbox.enqueue_on to fail
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("crash-like outbox enqueue failure")
+
+    outbox.enqueue_on = fail_enqueue
+
+    # Try to delete - should fail and roll back
+    with pytest.raises(RuntimeError, match="crash-like"):
+        l1.forget_with_outbox(
+            record.source_id,
+            document_id_factory=lambda source_id: f"doc-{source_id}",
+            delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+            outbox_store=outbox
+        )
+
+    # Verify rollback: record still exists, revision unchanged
+    assert l1.get(record.source_id) is not None
+    assert l1.get_revision(record.source_id) == 1
+    assert l1.recall("fail-delete") != []
+
+    # Verify no outbox row created for delete
+    doc_id = f"doc-{record.source_id}"
+    assert outbox.get_by_identity(doc_id, 2) is None
+
+    # Restore original method and verify adapter is reusable
+    outbox.enqueue_on = type(outbox).enqueue_on.__get__(outbox)
+
+    new_revision = l1.forget_with_outbox(
+        record.source_id,
+        document_id_factory=lambda source_id: f"doc-{source_id}",
+        delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+        outbox_store=outbox
+    )
+    assert new_revision == 2
+    assert l1.get(record.source_id) is None
+
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_forget_outbox_commit_failure(tmp_path):
+    """Injected commit failure → both rolled back, retry succeeds with one identity."""
+    import sqlite3
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    class FaultyConnection(sqlite3.Connection):
+        fail_commit = False
+        def commit(self):
+            if self.fail_commit:
+                self.fail_commit = False
+                raise sqlite3.OperationalError("injected atomic commit failure")
+            return super().commit()
+
+    connection = sqlite3.connect(tmp_path / "l1.db", factory=FaultyConnection)
+    l1 = SQLiteL1Adapter(connection=connection)
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    # Create a record
+    record = l1.remember_with_outbox(
+        "commit-fail-delete", {},
+        document_id_factory=lambda source_id: "doc-commit-fail",
+        promotion_metadata_factory=lambda record: record.metadata,
+        outbox_store=outbox
+    )
+    assert l1.get_revision(record.source_id) == 1
+
+    # Inject commit failure on delete
+    connection.fail_commit = True
+    with pytest.raises(sqlite3.OperationalError, match="injected atomic commit"):
+        l1.forget_with_outbox(
+            record.source_id,
+            document_id_factory=lambda source_id: "doc-commit-fail",
+            delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+            outbox_store=outbox
+        )
+
+    # Verify rollback
+    assert l1.get(record.source_id) is not None
+    assert l1.get_revision(record.source_id) == 1
+    assert outbox.get_by_identity("doc-commit-fail", 2) is None
+
+    # Retry should succeed with one identity
+    new_revision = l1.forget_with_outbox(
+        record.source_id,
+        document_id_factory=lambda source_id: "doc-commit-fail",
+        delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+        outbox_store=outbox
+    )
+    assert new_revision == 2
+    assert outbox.get_by_identity("doc-commit-fail", 2) is not None
+
+    l1.close()
+    outbox.close()
+    connection.close()
+
+
+def test_atomic_forget_unknown_id_returns_none(tmp_path):
+    """Forgetting a non-existent source_id returns None, no outbox row created."""
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    result = l1.forget_with_outbox(
+        "does-not-exist",
+        document_id_factory=lambda source_id: f"doc-{source_id}",
+        delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+        outbox_store=outbox
+    )
+
+    assert result is None
+    assert outbox.get_stats()["pending"] == 0
+
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_forget_already_deleted_returns_none(tmp_path):
+    """Second delete returns None, no duplicate outbox row."""
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    # Create and delete once
+    record = l1.remember_with_outbox(
+        "double-delete", {},
+        document_id_factory=lambda source_id: "doc-double",
+        promotion_metadata_factory=lambda record: record.metadata,
+        outbox_store=outbox
+    )
+    doc_id = f"doc-{record.source_id}"
+
+    first_rev = l1.forget_with_outbox(
+        record.source_id,
+        document_id_factory=lambda source_id: doc_id,
+        delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+        outbox_store=outbox
+    )
+    assert first_rev == 2
+
+    # Count outbox rows
+    pending_before = outbox.get_stats()["pending"]
+
+    # Try to delete again
+    second_rev = l1.forget_with_outbox(
+        record.source_id,
+        document_id_factory=lambda source_id: doc_id,
+        delete_metadata_factory=lambda sid, rev: {"operation": "delete"},
+        outbox_store=outbox
+    )
+
+    # Should return None and not create another outbox row
+    assert second_rev is None
+    assert outbox.get_stats()["pending"] == pending_before  # No new row
+
+    l1.close()
+    outbox.close()
