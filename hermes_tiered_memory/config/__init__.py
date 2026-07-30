@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import pathlib
+import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -99,15 +100,17 @@ class ProtectedConfigLoader:
         """Clear all pinned keys (for testing)."""
         cls._pinned_keys.clear()
 
-    def __init__(self, config_path: pathlib.Path, signature_path: pathlib.Path | None = None):
+    def __init__(self, config_path: pathlib.Path, signature_path: pathlib.Path | None = None, replay_state_path: pathlib.Path | None = None):
         """Initialize the loader with configuration and optional signature paths."""
         self.config_path = config_path
         self.signature_path = signature_path
+        self.replay_state_path = replay_state_path or config_path.with_name(f"{config_path.name}.replay-state")
 
         # Track accepted sequence and digest for rollback prevention
         self._accepted_sequence: int | None = None
         self._accepted_digest: str | None = None
         self._last_config_id: str | None = None
+        self._load_replay_state()
 
     def _validate_file(self, path: pathlib.Path, must_exist: bool = True) -> None:
         """Validate file permissions and ownership."""
@@ -117,14 +120,16 @@ class ProtectedConfigLoader:
         if not path.exists():
             return
 
-        stat = path.stat()
+        stat_result = path.stat()
 
-        # Reject symlinks
-        if path.is_symlink():
-            raise ProtectedConfigValidationError(f"Protected config file is a symlink: {path}")
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise ProtectedConfigValidationError(f"Protected config path is not a regular file: {path}")
+        current_uid = getattr(os, "getuid", lambda: None)()
+        if current_uid is not None and stat_result.st_uid not in {0, current_uid}:
+            raise ProtectedConfigValidationError(f"Protected config file has unsafe ownership: {path}")
 
         # Reject group/world writable
-        if stat.st_mode & 0o022:
+        if stat_result.st_mode & 0o022:
             raise ProtectedConfigValidationError(
                 f"Protected config file is group/world writable: {path}"
             )
@@ -136,7 +141,11 @@ class ProtectedConfigLoader:
 
     def _load_jcs_json(self, path: pathlib.Path) -> tuple[dict[str, Any], bytes]:
         """Load and validate JCS JSON (RFC 8785) from file."""
-        content = path.read_text(encoding="utf-8")
+        content = path.read_bytes()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ProtectedConfigValidationError(f"Invalid UTF-8 JSON in {path}: {e}") from e
 
         def object_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             result: dict[str, Any] = {}
@@ -147,7 +156,7 @@ class ProtectedConfigLoader:
             return result
 
         try:
-            data = json.loads(content, object_pairs_hook=object_pairs_hook)
+            data = json.loads(text, object_pairs_hook=object_pairs_hook)
         except json.JSONDecodeError as e:
             raise ProtectedConfigValidationError(f"Invalid JSON in {path}: {e}")
 
@@ -159,7 +168,44 @@ class ProtectedConfigLoader:
             data, separators=(",", ":"), sort_keys=True, ensure_ascii=False
         ).encode("utf-8")
 
-        return data, raw_bytes
+        if content != raw_bytes:
+            raise ProtectedConfigValidationError(f"Protected config is not encoded as exact canonical JSON: {path}")
+        return data, content
+
+    def _load_replay_state(self) -> None:
+        if not self.replay_state_path.exists():
+            return
+        self._validate_file(self.replay_state_path)
+        try:
+            state = json.loads(self.replay_state_path.read_bytes().decode("utf-8"))
+            if not isinstance(state, dict) or not isinstance(state.get("config_id"), str) or not isinstance(state.get("sequence"), int) or not isinstance(state.get("digest"), str):
+                raise ValueError("invalid replay state shape")
+            self._last_config_id = state["config_id"]
+            self._accepted_sequence = state["sequence"]
+            self._accepted_digest = state["digest"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+            raise ProtectedConfigValidationError(f"Invalid protected config replay state: {self.replay_state_path}") from e
+
+    def _persist_replay_state(self, config: ProtectedConfig) -> None:
+        parent = self.replay_state_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.replay_state_path.with_name(f".{self.replay_state_path.name}.tmp")
+        payload = json.dumps({"config_id": config.config_id, "sequence": config.sequence, "digest": config.payload_digest}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.replay_state_path)
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def _parse_timestamp(self, value: str) -> datetime:
         """Parse RFC 3339 UTC timestamp."""
@@ -259,13 +305,13 @@ class ProtectedConfigLoader:
         if now > config.expires_at + timedelta(seconds=self.CLOCK_SKEW_SECONDS):
             raise ProtectedConfigFreshnessError(f"Config has expired: {config.expires_at}")
 
-        # A loader instance is single-use for a config stream.  Equal sequence
-        # numbers are replays, even when the payload is byte-for-byte equal.
         if self._accepted_sequence is not None and config.config_id == self._last_config_id:
-            if config.sequence <= self._accepted_sequence:
+            if config.sequence < self._accepted_sequence:
                 raise ProtectedConfigFreshnessError(
-                    f"Config sequence {config.sequence} was already accepted"
+                    f"Config sequence {config.sequence} is less than accepted {self._accepted_sequence}"
                 )
+            if config.sequence == self._accepted_sequence and config.payload_digest != self._accepted_digest:
+                raise ProtectedConfigFreshnessError(f"Config sequence {config.sequence} changed payload without incrementing sequence")
 
     def _validate_signature(
         self, payload: bytes, key_id: str, signature_data: bytes | None
@@ -284,11 +330,7 @@ class ProtectedConfigLoader:
         try:
             secret = key_material if isinstance(key_material, bytes) else None
             if secret is not None:
-                expected_sig = hmac.new(
-                    self.DOMAIN_SEPARATOR + secret,
-                    payload,
-                    hashlib.sha256,
-                ).digest()
+                expected_sig = hmac.new(secret, self.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest()
 
                 if not hmac.compare_digest(expected_sig, signature_data):
                     raise ProtectedConfigAuthError(
@@ -370,6 +412,7 @@ class ProtectedConfigLoader:
         self._last_config_id = config.config_id
         self._accepted_sequence = config.sequence
         self._accepted_digest = config.payload_digest
+        self._persist_replay_state(config)
 
         return config
 

@@ -26,12 +26,12 @@ def _write_signed_config(directory, data):
     secret = b"test-secret"
     ProtectedConfigLoader.register_key("test-key", secret)
     path = Path(directory) / "config.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    path.write_bytes(json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8"))
     path.chmod(0o600)
     payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature_path = Path(directory) / "config.sig"
     signature_path.write_bytes(
-        hmac.new(ProtectedConfigLoader.DOMAIN_SEPARATOR + secret, payload, hashlib.sha256).digest()
+        hmac.new(secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest()
     )
     signature_path.chmod(0o600)
     return path, signature_path
@@ -94,3 +94,39 @@ def test_same_sequence_changed_payload_rejected():
         _write_signed_config(directory, data)
         with pytest.raises(ProtectedConfigFreshnessError):
             loader.load()
+
+
+def test_same_sequence_same_payload_survives_loader_restart(tmp_path):
+    path, signature_path = _write_signed_config(tmp_path, _config())
+    ProtectedConfigLoader(path, signature_path).load()
+    assert (tmp_path / "config.json.replay-state").is_file()
+    assert ProtectedConfigLoader(path, signature_path).load().sequence == 1
+
+
+def test_lower_sequence_rejected_after_loader_restart(tmp_path):
+    path, signature_path = _write_signed_config(tmp_path, _config(sequence=2))
+    ProtectedConfigLoader(path, signature_path).load()
+    path, signature_path = _write_signed_config(tmp_path, _config(sequence=1))
+    with pytest.raises(ProtectedConfigFreshnessError, match="less than accepted"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+def test_noncanonical_json_is_rejected(tmp_path):
+    secret = b"test-secret"
+    ProtectedConfigLoader.register_key("test-key", secret)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(_config(), indent=2), encoding="utf-8")
+    path.chmod(0o600)
+    payload = path.read_bytes()
+    signature = tmp_path / "config.sig"
+    signature.write_bytes(hmac.new(secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest())
+    signature.chmod(0o600)
+    with pytest.raises(ProtectedConfigValidationError, match="canonical"):
+        ProtectedConfigLoader(path, signature).load()
+
+
+def test_directory_config_is_rejected(tmp_path):
+    config = tmp_path / "config.json"
+    config.mkdir()
+    with pytest.raises(ProtectedConfigValidationError, match="regular file"):
+        ProtectedConfigLoader(config).load()

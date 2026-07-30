@@ -32,7 +32,7 @@ def test_registration_rejects_current_non_memory_provider(monkeypatch):
     context = Mock()
 
     with pytest.raises(RuntimeError, match="does not implement"):
-        package.register_memory_provider(context)
+        package.register(context)
 
     context.register_memory_provider.assert_not_called()
 
@@ -42,7 +42,7 @@ def test_registration_fails_closed_when_hermes_api_is_unavailable(monkeypatch):
     context = Mock()
 
     with pytest.raises(RuntimeError, match="API is unavailable"):
-        package.register_memory_provider(context)
+        package.register(context)
 
     context.register_memory_provider.assert_not_called()
 
@@ -97,13 +97,12 @@ def test_startup_rejects_malformed_config(tmp_path):
         _provider(tmp_path, config).initialize_all()
 
 
-def test_loader_rejects_replayed_sequence(tmp_path):
+def test_loader_accepts_same_sequence_identical_payload(tmp_path):
     from tests.unit.test_config import _config, _write_signed_config
-    from hermes_tiered_memory.config import ProtectedConfigFreshnessError, ProtectedConfigLoader
+    from hermes_tiered_memory.config import ProtectedConfigLoader
 
     path, signature_path = _write_signed_config(tmp_path, _config())
     loader = ProtectedConfigLoader(path, signature_path)
     loader.load()
 
-    with pytest.raises(ProtectedConfigFreshnessError, match="already accepted"):
-        loader.load()
+    assert loader.load().sequence == 1

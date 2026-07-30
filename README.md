@@ -25,15 +25,19 @@ This package contains the current composite-provider prototype, deterministic un
 
 ```
 Hermes
-  └── CompositeProvider (one configured MemoryProvider)
+  └── CompositeProvider (future Hermes-facing boundary; not currently loadable)
         ├── Mnemosyne L1 adapter (synchronous reads/writes)
         ├── Hindsight L2 adapter (reads + retain/batch-retain)
-        └── Durable outbox + promotion worker
+        └── Promotion behavior (prototype only; no durability claim)
 ```
 
 The composite owns the sole Hermes-facing memory tool namespace (`memory_search`, `memory_store`). Mnemosyne and Hindsight adapters expose no duplicate Hermes tools.
 
-## Installation
+## Future integration shape (not currently executable)
+
+The following describes the intended future integration shape only. The current
+package deliberately fails closed because `CompositeProvider` does not yet
+implement the pinned Hermes `MemoryProvider` ABC.
 
 ### Prerequisites
 
@@ -43,7 +47,7 @@ The composite owns the sole Hermes-facing memory tool namespace (`memory_search`
 - Hindsight v0.8.6 (commit `08995e3`)
 - Protected Hindsight endpoint configuration (see Configuration)
 
-### Install
+### Future install
 
 ```bash
 pip install hermes-tiered-memory[mnemosyne,hindsight]
@@ -55,7 +59,7 @@ For development:
 pip install hermes-tiered-memory[dev]
 ```
 
-## Configuration
+## Future configuration
 
 The composite requires a protected Hindsight endpoint configuration file with integrity authentication.
 
@@ -90,13 +94,14 @@ Create a protected configuration file (JCS JSON, RFC 8785):
 
 ### Integrity Authentication
 
-Compute the HMAC-SHA-256 or Ed25519 signature over the exact JCS bytes with domain separator `hermes-tiered-memory/config/v1\0`.
+Compute HMAC-SHA-256 as `HMAC(secret, DOMAIN_SEPARATOR + exact_JCS_bytes)` (or Ed25519 over the same domain-separated bytes), with domain separator `hermes-tiered-memory/config/v1\\0`. The file bytes must be exactly canonical JCS JSON; whitespace or alternate JSON spellings are rejected.
 
 Store the signature in a separate file (or secret-store object).
 
 ### Hermes Configuration
 
-Configure Hermes with the composite provider:
+If and when the pinned Hermes provider boundary is implemented and verified,
+the intended configuration shape would be:
 
 ```yaml
 memory:
@@ -174,10 +179,7 @@ hermes_tiered_memory/
 │   ├── __init__.py
 │   ├── l1.py            # Mnemosyne L1 adapter
 │   └── l2.py            # Hindsight L2 adapter
-├── outbox/
-│   ├── __init__.py
-│   ├── store.py         # Durable outbox storage
-│   └── worker.py        # Promotion worker
+└── outbox/                 # Prototype internals; not a durability contract
 └── providers/
     └── composite.py     # Main Hermes-facing provider
 

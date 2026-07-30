@@ -11,7 +11,7 @@ __all__ = ["CompositeProvider"]
 __version__ = "0.1.0"
 
 
-def register_memory_provider(ctx):
+def register(ctx):
     """Register the provider only when the pinned Hermes boundary is usable.
 
     This deliberately fails closed.  The repository's current
@@ -48,3 +48,8 @@ def register_memory_provider(ctx):
             "tiered provider was not registered"
         )
     register(provider)
+
+
+def register_memory_provider(ctx):
+    """Backward-compatible alias for the plugin loader entrypoint."""
+    return register(ctx)
