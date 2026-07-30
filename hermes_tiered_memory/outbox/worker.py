@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from hermes_tiered_memory.adapters.l2 import L2Adapter
     from hermes_tiered_memory.outbox.store import OutboxStore
 
+from hermes_tiered_memory.adapters.l2 import L2RetainResult
 from hermes_tiered_memory.outbox.store import (
     OutboxItem,
     OutboxState,
@@ -128,14 +129,32 @@ class PromotionWorker:
 
         metadata = json.loads(item.metadata_snapshot)
 
+        # A committed tombstone supersedes every older promotion. Check before
+        # touching L2 so a stale retry can never resurrect deleted content.
+        operation = metadata.get("operation", "upsert")
+        if operation != "delete":
+            delete_revision = self.outbox_store.latest_delete_revision(item.document_id)
+            if delete_revision is not None and item.mnemosyne_rev < delete_revision:
+                self._mark_stale(item)
+                return
+
         try:
-            # Attempt promotion
-            result = self.l2_adapter.retain(
-                document_id=item.document_id,
-                content=item.content_snapshot,
-                metadata=metadata,
-                async_op=True,
-            )
+            if operation == "delete":
+                deleted = self.l2_adapter.delete_document(
+                    metadata.get("bank", ""), item.document_id
+                )
+                result = L2RetainResult(
+                    operation_id=None,
+                    success=bool(deleted),
+                    error=None if deleted else "L2 delete failed",
+                )
+            else:
+                result = self.l2_adapter.retain(
+                    document_id=item.document_id,
+                    content=item.content_snapshot,
+                    metadata=metadata,
+                    async_op=True,
+                )
 
             if result.success:
                 # Promotion succeeded
@@ -163,6 +182,20 @@ class PromotionWorker:
         except Exception as e:
             logger.exception(f"Error processing item {item.row_id}: {e}")
             self._handle_failure(item, str(e))
+
+    def _mark_stale(self, item: OutboxItem) -> None:
+        """Record that an older upsert was safely skipped after deletion."""
+        if item.row_id is None:
+            return
+        success = self.outbox_store.update_state(
+            row_id=item.row_id,
+            expected_state_version=item.state_version,
+            new_state=OutboxState.QUARANTINED,
+            terminal_outcome=TerminalOutcome.STALE_SUPERSEDED,
+            error_class="stale_superseded",
+        )
+        if not success:
+            logger.warning("CAS conflict marking stale item %s", item.row_id)
 
     def _handle_failure(self, item: OutboxItem, error: str) -> None:
         """Handle a promotion failure."""

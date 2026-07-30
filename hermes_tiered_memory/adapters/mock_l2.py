@@ -97,15 +97,28 @@ class MockL2Adapter(L2Adapter):
         return results
 
     def delete_document(self, bank_id: str, document_id: str) -> bool:
-        """Delete a document from L2."""
+        """Delete a document from L2.
+
+        Returns True if the document existed and was deleted, or if it didn't
+        exist (idempotent delete). Returns False only if there's a mismatch
+        in bank_id for an existing document.
+
+        NOTE: This mock implements idempotent deletes for testing convenience.
+        Real L2 adapters may have different semantics. When integrating a new
+        L2 backend, verify its delete behavior independently:
+        - Does deleting a non-existent document succeed or fail?
+        - Is delete idempotent (calling delete twice is safe)?
+        - Does delete return consistent success/failure semantics?
+        """
         if self._fail_next_delete:
             self._fail_next_delete = False
             return False
 
         if document_id not in self._documents:
-            return False
+            # Idempotent: deleting a non-existent document is a no-op but succeeds
+            return True
 
-        # Verify bank_id matches
+        # Verify bank_id matches for existing document
         if self._documents[document_id].metadata.get("bank") != bank_id:
             return False
 
@@ -139,3 +152,15 @@ class MockL2Adapter(L2Adapter):
     def set_fail_next_delete(self, fail: bool) -> None:
         """Set whether the next delete should fail."""
         self._fail_next_delete = fail
+
+    def get_retain_calls(self) -> list[dict[str, Any]]:
+        """Return a list of retain calls made to this adapter."""
+        # Return documents that were retained (including their metadata)
+        return [
+            {
+                "document_id": doc_id,
+                "content": doc.content,
+                "metadata": doc.metadata,
+            }
+            for doc_id, doc in self._documents.items()
+        ]
