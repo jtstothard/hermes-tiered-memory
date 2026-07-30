@@ -1,6 +1,11 @@
 """Focused tests for the concrete SQLite L1 persistence boundary."""
 
+import json
+import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -10,7 +15,163 @@ import pytest
 from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
 
 
-def test_l1_records_persist_across_adapter_restarts(tmp_path):
+def test_atomic_l1_outbox_success_and_shared_topology(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+    record = l1.remember_with_outbox("atomic", {"kind": "test"},
+                                    document_id_factory=lambda source_id: "doc-1",
+                                    promotion_metadata_factory=lambda record: {"kind": record.metadata["kind"]},
+                                    outbox_store=outbox)
+
+    assert l1.get(record.source_id) is not None
+    item = outbox.get_by_identity("doc-1", 1)
+    assert item is not None
+    assert item.mnemosyne_id == record.source_id
+    assert l1.connection.execute("PRAGMA database_list").fetchall()[-1][2] == str(tmp_path / "outbox.db")
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_outbox_insert_failure_rolls_back_l1_and_is_reusable(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("crash-like enqueue failure")
+
+    outbox.enqueue_on = fail
+    with pytest.raises(RuntimeError, match="crash-like"):
+        l1.remember_with_outbox("lost", {}, document_id_factory=lambda _: "doc-lost",
+                                promotion_metadata_factory=lambda record: record.metadata,
+                                outbox_store=outbox)
+    assert l1.recall("lost") == []
+    assert outbox.get_stats()["pending"] == 0
+
+    outbox.enqueue_on = type(outbox).enqueue_on.__get__(outbox)
+    record = l1.remember_with_outbox("retry", {}, document_id_factory=lambda _: "doc-retry",
+                                    promotion_metadata_factory=lambda record: record.metadata,
+                                    outbox_store=outbox)
+    assert l1.get(record.source_id) is not None
+    assert outbox.get_stats()["pending"] == 1
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_commit_failure_rolls_back_both_and_retry_has_one_identity(tmp_path):
+    import sqlite3
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    class FaultyConnection(sqlite3.Connection):
+        fail_commit = False
+        def commit(self):
+            if self.fail_commit:
+                self.fail_commit = False
+                raise sqlite3.OperationalError("injected atomic commit failure")
+            return super().commit()
+
+    connection = sqlite3.connect(tmp_path / "l1.db", factory=FaultyConnection)
+    l1 = SQLiteL1Adapter(connection=connection)
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    l1.configure_atomic_outbox(outbox)
+    connection.fail_commit = True
+    with pytest.raises(sqlite3.OperationalError, match="atomic commit"):
+        l1.remember_with_outbox("retryable", {}, document_id_factory=lambda _: "same-doc",
+                                promotion_metadata_factory=lambda record: record.metadata,
+                                outbox_store=outbox)
+    assert l1.recall("retryable") == []
+    assert outbox.get_stats()["pending"] == 0
+
+    record = l1.remember_with_outbox("retryable", {}, document_id_factory=lambda _: "same-doc",
+                                    promotion_metadata_factory=lambda record: record.metadata,
+                                    outbox_store=outbox)
+    assert outbox.get_by_identity("same-doc", record.revision) is not None
+    assert outbox.get_stats()["pending"] == 1
+    l1.close()
+    outbox.close()
+    connection.close()
+
+
+def test_configure_atomic_outbox_commit_failure_detaches_and_allows_retry(tmp_path):
+    from hermes_tiered_memory.outbox.store import OutboxStore
+
+    class FaultyConnection(sqlite3.Connection):
+        fail_commit = False
+        def commit(self):
+            if self.fail_commit:
+                self.fail_commit = False
+                raise sqlite3.OperationalError("injected configure commit failure")
+            return super().commit()
+
+    connection = sqlite3.connect(tmp_path / "l1.db", factory=FaultyConnection)
+    l1 = SQLiteL1Adapter(connection=connection)
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    connection.fail_commit = True
+    with pytest.raises(sqlite3.OperationalError, match="configure commit"):
+        l1.configure_atomic_outbox(outbox)
+    assert not l1.supports_atomic_outbox
+    assert all(row[1] != "outbox" for row in connection.execute("PRAGMA database_list"))
+    l1.configure_atomic_outbox(outbox)
+    assert l1.supports_atomic_outbox
+    l1.close()
+    outbox.close()
+    connection.close()
+
+
+def test_atomic_write_kill_restart_has_no_one_sided_state(tmp_path):
+    """Probe rollback-journal recovery; this does not prove all crash timings."""
+    script = r'''
+import os, signal, sys
+from pathlib import Path
+from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+from hermes_tiered_memory.outbox.store import OutboxStore
+l1 = SQLiteL1Adapter(sys.argv[1])
+outbox = OutboxStore(Path(sys.argv[2]))
+l1.configure_atomic_outbox(outbox)
+outbox.enqueue_on = lambda *args, **kwargs: os.kill(os.getpid(), signal.SIGKILL)
+l1.remember_with_outbox('crash-probe', {}, document_id_factory=lambda _: 'crash-probe-doc',
+                        promotion_metadata_factory=lambda record: record.metadata,
+                        outbox_store=outbox)
+'''
+    env = {**os.environ, "PYTHONPATH": os.getcwd()}
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "l1.db"), str(tmp_path / "outbox.db")],
+        env=env, check=False,
+    )
+    assert result.returncode == -signal.SIGKILL
+    l1 = SQLiteL1Adapter(tmp_path / "l1.db")
+    from hermes_tiered_memory.outbox.store import OutboxStore
+    outbox = OutboxStore(tmp_path / "outbox.db")
+    assert l1.recall("crash-probe") == []
+    assert outbox.get_stats()["pending"] == 0
+    l1.close()
+    outbox.close()
+
+
+def test_atomic_provider_preserves_promotion_metadata_envelope(tmp_path):
+    from unittest.mock import Mock
+    from hermes_tiered_memory.outbox.store import OutboxStore
+    from hermes_tiered_memory.providers.composite import CompositeProvider
+    provider = CompositeProvider(
+        session=Mock(), platform="cli", hermes_home=str(tmp_path), context={},
+        user_identity="user", chat_identity="chat", thread_identity="thread",
+        active_profile_identity="profile",
+    )
+    provider.l1_adapter = SQLiteL1Adapter(tmp_path / "l1.db")
+    provider.outbox_store = OutboxStore(tmp_path / "outbox.db")
+    result = provider.memory_store("enveloped", {"custom": "value", "tags": ["caller"]})
+    record = provider.l1_adapter.get(result["id"])
+    assert record is not None
+    item = provider.outbox_store.get_by_identity(provider._generate_document_id(result["id"]), record.revision)
+    assert item is not None
+    assert json.loads(item.metadata_snapshot) == provider._build_promotion_metadata(record)
+    provider.close()
+
     db_path = tmp_path / "l1.db"
     first = SQLiteL1Adapter(db_path)
     record = first.remember("durable content", {"topic": "test"})

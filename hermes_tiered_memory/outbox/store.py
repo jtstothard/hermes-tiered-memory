@@ -123,6 +123,7 @@ class OutboxStore:
         self.db_path = db_path
         self._local = threading.local()
         self._lock = threading.Lock()
+        self._atomic_journal_mode = False
 
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +138,14 @@ class OutboxStore:
                 self.db_path, check_same_thread=False
             )
             self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            if not self._atomic_journal_mode:
+                # WAL is retained for standalone outbox operation.  When this
+                # database is attached to SQLite L1, the adapter switches it to
+                # DELETE before the shared transaction; ATTACH crash atomicity is
+                # only established for the rollback-journal topology.
+                self._local.conn.execute("PRAGMA journal_mode=WAL")
+            else:
+                self._local.conn.execute("PRAGMA journal_mode=DELETE")
             self._local.conn.execute("PRAGMA foreign_keys=ON")
         return self._local.conn
 
@@ -179,6 +187,67 @@ class OutboxStore:
         """
         )
         conn.commit()
+
+    def initialize_schema_on(self, connection: sqlite3.Connection, schema: str = "main") -> None:
+        """Create the owned outbox schema on an existing connection, without commit."""
+        qualified = f'"{schema}".outbox'
+        connection.execute(f"""
+            CREATE TABLE IF NOT EXISTS {qualified} (
+                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id TEXT NOT NULL,
+                mnemosyne_id TEXT NOT NULL,
+                mnemosyne_rev INTEGER NOT NULL,
+                content_snapshot TEXT NOT NULL,
+                metadata_snapshot TEXT NOT NULL,
+                state TEXT NOT NULL,
+                state_version INTEGER NOT NULL,
+                terminal_outcome TEXT NOT NULL DEFAULT 'none',
+                owner_id TEXT, lease_id TEXT, lease_expires_at INTEGER,
+                fence INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER,
+                attempt_no INTEGER NOT NULL DEFAULT 0, retry_cycle_no INTEGER NOT NULL DEFAULT 0,
+                quarantine_origin_at INTEGER, last_error_class TEXT, last_http_status INTEGER,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                UNIQUE(document_id, mnemosyne_rev)
+            )
+        """)
+        # The unique identity constraint is sufficient for this write slice. The
+        # normal OutboxStore connection creates the worker index separately.
+
+    def prepare_for_atomic_attach(self, connection: sqlite3.Connection, schema: str = "outbox") -> None:
+        """Use rollback journaling for an ATTACH transaction.
+
+        SQLite's multi-database atomic commit protocol is not established when
+        an attached database remains in WAL mode.  This deliberately changes
+        the outbox file's persistent journal mode only for the concrete L1
+        atomic topology; standalone OutboxStore connections still default to
+        WAL for their existing behavior.
+        """
+        # Release the standalone connection's WAL/read handles before changing
+        # the persistent journal mode through the attaching connection.
+        if hasattr(self._local, "conn"):
+            self._local.conn.close()
+            delattr(self._local, "conn")
+        self._atomic_journal_mode = True
+        mode = connection.execute(f'PRAGMA "{schema}".journal_mode=DELETE').fetchone()[0]
+        if str(mode).lower() != "delete":
+            raise RuntimeError(f"attached outbox journal mode is {mode!r}, expected 'delete'")
+
+    def enqueue_on(self, connection: sqlite3.Connection, *, schema: str = "main",
+                   document_id: str, mnemosyne_id: str, mnemosyne_rev: int,
+                   content: str, metadata: dict[str, Any]) -> int:
+        """Insert without committing; the caller owns the transaction."""
+        now = int(time.time())
+        cursor = connection.execute(
+            f'''INSERT INTO "{schema}".outbox (
+                document_id, mnemosyne_id, mnemosyne_rev, content_snapshot,
+                metadata_snapshot, state, state_version, terminal_outcome,
+                fence, attempt_no, retry_cycle_no, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (document_id, mnemosyne_id, mnemosyne_rev, content,
+             json.dumps(metadata, separators=(",", ":")), OutboxState.PENDING.value,
+             0, TerminalOutcome.NONE.value, 0, 0, 0, now, now),
+        )
+        return int(cursor.lastrowid)
 
     def enqueue(
         self,
