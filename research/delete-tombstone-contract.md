@@ -95,7 +95,7 @@ The following are explicitly NOT claimed:
 
 ## 6. Test Coverage
 
-- **122 tests pass** (`python3 -m pytest -q -o addopts=''`), 40 existing deprecation warnings.
+- **120 tests pass** (`python3 -m pytest -q -o addopts=''`). Warnings are deprecation (`datetime.utcnow`) and non-deterministic SQLite `ResourceWarning` from GC timing.
 - **28 SQLite L1 tests**: tombstone persistence, hidden reads, revision retention, idempotent delete, atomic delete outbox, rollback, commit failure, unknown-id, already-deleted.
 - **22 worker tests**: stale upsert, delete/replay, crash-replay (in-flight/promoted), backfill (higher/lower revision), concurrent workers via real threads, genuine claim race, quarantine permanence.
 - `python3 -m compileall -q hermes_tiered_memory tests` — clean.

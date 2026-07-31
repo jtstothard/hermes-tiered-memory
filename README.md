@@ -7,7 +7,8 @@ A fail-closed composite-provider prototype for a future Hermes integration. It i
 This package contains the current composite-provider prototype, deterministic unit/contract tests, and developer documentation. It does not yet provide a usable pinned-Hermes `MemoryProvider` implementation or live adapter integration.
 
 **What is included:**
-- Internal composite prototype with deterministic mock-adapter tests
+- Composite-provider prototype with deterministic mock-adapter tests
+- Durable outbox tombstones and ordered delete processing
 - Protected endpoint configuration validation and fail-closed startup checks
 - Fail-closed registration when the pinned Hermes API boundary is unavailable
 - No bundled dependencies or Hermes core changes
@@ -15,7 +16,7 @@ This package contains the current composite-provider prototype, deterministic un
 **What is explicitly NOT included:**
 - A usable Hermes `MemoryProvider` implementation or live registration
 - Live Mnemosyne/Hindsight adapter routes or compatibility evidence
-- Outbox operation IDs, tombstones, or replay implementation
+- Outbox crash replay: abandoned `in_flight` rows are not reclaimed (design in research/outbox-crash-recovery-contract.md)
 - Live integration tests with pinned Hermes/Mnemosyne/Hindsight services
 - Packaging and signing
 - Security evidence (TLS trust, OpenAPI route verification)
@@ -31,7 +32,7 @@ Hermes
         └── Promotion behavior (prototype only; no durability claim)
 ```
 
-The composite owns the sole Hermes-facing memory tool namespace (`memory_search`, `memory_store`). Mnemosyne and Hindsight adapters expose no duplicate Hermes tools.
+The composite is designed to own the sole Hermes-facing memory tool namespace (`memory_search`, `memory_store`) once live integration is implemented. Mnemosyne and Hindsight adapters expose no duplicate Hermes tools.
 
 ## Future integration shape (not currently executable)
 
@@ -184,19 +185,29 @@ mypy hermes_tiered_memory
 hermes_tiered_memory/
 ├── __init__.py           # Provider registration
 ├── config/
-│   ├── __init__.py
-│   └── protected.py      # Protected config validation
+│   └── __init__.py       # Protected config validation
 ├── adapters/
-│   ├── __init__.py
-│   ├── l1.py            # Mnemosyne L1 adapter
-│   └── l2.py            # Hindsight L2 adapter
-└── outbox/                 # Prototype internals; not a durability contract
+│   ├── l1.py            # L1 adapter interface
+│   ├── l2.py            # L2 adapter interface
+│   ├── mock_l1.py       # Mock L1 for testing
+│   ├── mock_l2.py       # Mock L2 for testing
+│   └── sqlite_l1.py     # Concrete SQLite L1 adapter
+├── outbox/
+│   ├── store.py          # Durable outbox storage
+│   └── worker.py         # Promotion worker
 └── providers/
-    └── composite.py     # Main Hermes-facing provider
+    └── composite.py     # Main composite provider
 
 tests/
 ├── unit/                # Unit tests
-└── contract/            # Contract tests (deterministic)
+│   ├── test_composite_provider.py
+│   ├── test_config.py
+│   ├── test_outbox_store.py
+│   ├── test_provider_lifecycle.py
+│   ├── test_sqlite_l1.py
+│   └── test_worker.py
+└── contract/            # Contract tests
+    └── test_contracts.py
 ```
 
 ### Contracts
