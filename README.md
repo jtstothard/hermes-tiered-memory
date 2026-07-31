@@ -147,15 +147,26 @@ profiles:
 
 ### Run Tests
 
+Create an isolated environment and install the declared test extra:
+
 ```bash
-# Unit tests (no external services)
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[test]'
+```
+
+The reproducible baseline command is the same locally and in CI:
+
+```bash
+python -m pytest -q
+```
+
+This collects `tests/unit` and `tests/contract` via `pyproject.toml`; it must fail if collection or any test fails. For focused runs:
+
+```bash
 python -m pytest tests/unit -v
-
-# Contract tests (deterministic, no live services)
 python -m pytest tests/contract -v
-
-# Full test suite
-python -m pytest tests/ -v --cov=hermes_tiered_memory --cov-report=html
 ```
 
 ### Lint and Type Check
