@@ -18,7 +18,7 @@ from hermes_tiered_memory.config import ProtectedConfigLoader
 from hermes_tiered_memory.providers.composite import CompositeProvider
 
 
-def _write_signed_config(directory: Path) -> tuple[Path, Path]:
+def _write_signed_config(directory: Path, ca_file: str | None = None) -> tuple[Path, Path]:
     secret = b"composite-wiring-test-key"
     ProtectedConfigLoader.register_key("composite-wiring-key", secret)
     payload = {
@@ -34,7 +34,7 @@ def _write_signed_config(directory: Path) -> tuple[Path, Path]:
             "host": "hindsight.invalid",
             "port": 443,
             "base_path": "/api/v1",
-            "tls": {"verify": True, "ca_file": None},
+            "tls": {"verify": True, "ca_file": ca_file},
             "proxy": {"enabled": False},
         },
     }
@@ -154,6 +154,50 @@ def test_initialize_wires_real_adapters_outbox_and_worker(tmp_path, disposable_m
 
     assert provider.l1_adapter is not None and provider.l1_adapter.health()["status"] == "closed"
     assert provider.l2_adapter is not None and provider.l2_adapter.health()["status"] == "closed"
+
+
+def test_initialize_forwards_protected_ca_to_owned_l2_client(
+    tmp_path, disposable_mnemosyne, monkeypatch
+):
+    ca_path = tmp_path / "disposable-ca.crt"
+    ca_path.write_text("synthetic test CA")
+    ca_file = str(ca_path)
+    config_path, signature_path = _write_signed_config(tmp_path, ca_file=ca_file)
+    config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "test-key"}}}},
+        "tiered": {
+            "protected_config": {
+                "path": str(config_path),
+                "signature": {"path": str(signature_path)},
+            }
+        },
+    }
+    created: dict[str, object] = {}
+    tls_context = object()
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient)
+    monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.ssl.create_default_context", lambda *, cafile: tls_context)
+    provider = CompositeProvider(session=SimpleNamespace(config=config))
+
+    try:
+        provider.initialize(
+            "session-1",
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+        assert isinstance(provider.l2_adapter, HindsightL2Adapter)
+        assert provider.l2_adapter._tls_verify is tls_context
+        assert created["verify"] is tls_context
+    finally:
+        provider.close()
 
 
 @pytest.mark.parametrize(

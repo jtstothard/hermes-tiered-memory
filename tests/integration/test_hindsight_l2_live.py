@@ -27,7 +27,10 @@ def test_hindsight_l2_against_disposable_topology():
         "mnemosyne_revision": 2,
         "nested": {"preserved": ["synthetic", 2, None]},
     }
-    adapter = HindsightL2Adapter(base_url, timeout_seconds=30)
+    ca_file = os.environ.get("HINDSIGHT_E2E_CA")
+    if not ca_file:
+        pytest.skip("HINDSIGHT_E2E_CA is set only by the disposable topology harness")
+    adapter = HindsightL2Adapter(base_url, timeout_seconds=30, ca_file=ca_file)
     try:
         assert adapter.health()["status"] == "healthy"
         async_result = adapter.retain(
