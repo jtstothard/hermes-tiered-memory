@@ -13,17 +13,21 @@ hermes_tiered_memory/
 │   ├── l1.py            # L1 adapter interface
 │   ├── l2.py            # L2 adapter interface
 │   ├── mock_l1.py       # Mock L1 for testing
-│   └── mock_l2.py       # Mock L2 for testing
+│   ├── mock_l2.py       # Mock L2 for testing
+│   └── sqlite_l1.py     # Concrete SQLite L1 adapter
 ├── outbox/
-│   ├── store.py         # Durable outbox storage
-│   └── worker.py        # Promotion worker
+│   ├── store.py          # Durable outbox storage
+│   └── worker.py         # Promotion worker
 └── providers/
-    └── composite.py     # Main Hermes-facing provider
+    └── composite.py     # Main composite provider
 
 tests/
 ├── unit/                # Unit tests
 │   ├── test_composite_provider.py
+│   ├── test_config.py
 │   ├── test_outbox_store.py
+│   ├── test_provider_lifecycle.py
+│   ├── test_sqlite_l1.py
 │   └── test_worker.py
 └── contract/            # Contract tests
     └── test_contracts.py
@@ -33,7 +37,7 @@ tests/
 
 ### 1. One-Provider Boundary
 
-The composite presents as a single Hermes MemoryProvider. Mnemosyne and Hindsight adapters are internal implementation details and do not register their own tools with Hermes.
+The composite is designed to present as a single Hermes MemoryProvider once live integration is implemented. In the current prototype it does not register with Hermes (`CompositeProvider` does not implement the pinned `MemoryProvider` ABC). Mnemosyne and Hindsight adapters are internal implementation details and do not register their own tools with Hermes.
 
 ### 2. Cache-First, Write-Through Policy
 
@@ -70,29 +74,29 @@ All promoted memories include a provenance envelope:
 
 ## Testing
 
-### Run Unit Tests
+### Install test dependencies
+
+The test suite requires `pytest-cov` (declared in the `[test]` extra):
 
 ```bash
-python -m pytest tests/unit -v
+python -m pip install -e '.[test]'
 ```
 
-### Run Contract Tests
+### Run the full suite (canonical)
 
 ```bash
-python -m pytest tests/contract -v
+python -m pytest -q
 ```
 
-### Run Full Test Suite
+### Run a subset
 
 ```bash
-python -m pytest tests/ -v --cov=hermes_tiered_memory --cov-report=html
-```
-
-### Run Specific Test
-
-```bash
+python -m pytest tests/unit -v          # unit tests only
+python -m pytest tests/contract -v       # contract tests only
 python -m pytest tests/unit/test_outbox_store.py::TestOutboxStoreBasics::test_initialization_creates_schema -v
 ```
+
+CI (`.github/workflows/test.yml`) runs `python -m pytest -q` after `pip install -e '.[test]'` across Python 3.11–3.13.
 
 ## Code Quality
 
@@ -178,11 +182,15 @@ is_transient = error_class in ("transient", "rate_limit")
 
 ## Safety Guarantees
 
-1. **Never lose a promotion** - Atomic L1+outbox commit
+The following guarantees apply **only** to the concrete SQLite L1 adapter with the attached-outbox path (`SQLiteL1Adapter.remember_with_outbox`). Injected or mock adapters retain the historical non-atomic two-step behavior.
+
+1. **Never lose a promotion (SQLite path only)** - Atomic L1+outbox commit
 2. **Never block the queue** - Quarantine halts only failing documents
-3. **Never silently drop** - Every unresolved row durably represented
+3. **Never silently drop (SQLite path only)** - Every unresolved row durably represented
 4. **Never trust teardown for durability** - Outbox written at write time
 5. **Never retry permanent errors indefinitely** - Quarantine on permanent failure
+
+The non-SQLite path (mock/injected adapters) writes L1 first, then enqueues outbox separately; an enqueue failure after a successful L1 write is swallowed, so promotion is not guaranteed.
 
 ## Follow-Up Work
 

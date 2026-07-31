@@ -152,12 +152,6 @@ class TestContract03PromotionPolicy:
         stats = composite_provider.outbox_store.get_stats()
         assert stats.get("pending", 0) >= 3
 
-    def test_malformed_output_not_promoted(self, composite_provider):
-        """Contract: Malformed output not promoted."""
-        # This would be enforced at the consolidation level
-        # The composite promotes whatever is stored in L1
-        pass  # Integration-level contract
-
 
 class TestContract04IdentityDedupConflicts:
     """Contract #4: Identity and conflict handling."""
@@ -174,12 +168,6 @@ class TestContract04IdentityDedupConflicts:
         # Should be stable
         doc_id2 = composite_provider._generate_document_id(memory_id)
         assert doc_id == doc_id2
-
-    def test_revision_creates_new_document(self, composite_provider):
-        """Contract: Revision increment triggers Hindsight replace."""
-        # This is simulated at the outbox level
-        # Each (document_id, mnemosyne_rev) is unique
-        pass  # Integration-level contract
 
 
 class TestContract05MetadataRoundtrip:
