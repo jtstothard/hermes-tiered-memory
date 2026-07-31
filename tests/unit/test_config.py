@@ -66,6 +66,68 @@ def test_load_valid_config():
         assert config.hindsight.to_url() == "https://hindsight.example.com:443/api/v1"
 
 
+def test_reject_tls_verification_disabled(tmp_path):
+    data = _config()
+    data["hindsight"]["tls"]["verify"] = False
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    with pytest.raises(ProtectedConfigValidationError, match="TLS verification must be enabled"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+def test_reject_whitespace_only_ca_file(tmp_path):
+    data = _config()
+    data["hindsight"]["tls"]["ca_file"] = "   "
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    with pytest.raises(ProtectedConfigValidationError, match="tls.ca_file"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+@pytest.mark.parametrize("ca_file", ["relative/ca.pem", "/tmp/ca\x00.pem"])
+def test_reject_malformed_ca_file_path(tmp_path, ca_file):
+    data = _config()
+    data["hindsight"]["tls"]["ca_file"] = ca_file
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    with pytest.raises(ProtectedConfigValidationError, match="tls.ca_file"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+def test_reject_nonexistent_ca_file(tmp_path):
+    data = _config()
+    data["hindsight"]["tls"]["ca_file"] = str(tmp_path / "missing-ca.pem")
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    with pytest.raises(ProtectedConfigValidationError, match="tls.ca_file"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+def test_reject_unreadable_ca_file(tmp_path):
+    ca_file = tmp_path / "unreadable-ca.pem"
+    ca_file.write_text("test certificate", encoding="utf-8")
+    ca_file.chmod(0o000)
+    data = _config()
+    data["hindsight"]["tls"]["ca_file"] = str(ca_file)
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    with pytest.raises(ProtectedConfigValidationError, match="tls.ca_file"):
+        ProtectedConfigLoader(path, signature_path).load()
+
+
+def test_accept_valid_canonical_readable_ca_file(tmp_path):
+    ca_file = tmp_path / "hindsight-ca.pem"
+    ca_file.write_text("test certificate", encoding="utf-8")
+    ca_file.chmod(0o600)
+    data = _config()
+    data["hindsight"]["tls"]["ca_file"] = str(ca_file)
+    path, signature_path = _write_signed_config(tmp_path, data)
+
+    config = ProtectedConfigLoader(path, signature_path).load()
+
+    assert config.hindsight.ca_file == str(ca_file)
+
+
 def test_reject_duplicate_keys():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "config.json"
