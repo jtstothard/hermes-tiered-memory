@@ -337,6 +337,11 @@ class ProtectedConfigLoader:
             raise ProtectedConfigValidationError("Unsupported or invalid tls fields")
         if not isinstance(tls.get("verify"), bool):
             raise ProtectedConfigValidationError(f"Invalid tls.verify: {tls.get('verify')}")
+        ca_file = tls.get("ca_file")
+        if ca_file is not None and (not isinstance(ca_file, str) or not ca_file):
+            raise ProtectedConfigValidationError("Invalid tls.ca_file: expected non-empty string or null")
+        if ca_file is not None and not tls["verify"]:
+            raise ProtectedConfigValidationError("Invalid tls: ca_file requires verification")
 
         # Validate proxy config
         proxy = hindsight["proxy"]

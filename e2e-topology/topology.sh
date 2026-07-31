@@ -11,6 +11,7 @@ HERMES_SRC="${HERMES_SRC:-/home/hermes/hermes-agent}"
 MNEMOSYNE_SRC="${MNEMOSYNE_SRC:-/tmp/mnemosyne-v314}"
 HINDSIGHT_SRC="${HINDSIGHT_SRC:-/home/hermes/hindsight}"
 VENV="$ROOT/venv"
+TLS_DIR="$ROOT/tls"
 # Include the disposable root in the container name so a prior cleanup cannot
 # collide with a concurrent/just-finished disposable run.
 COMPOSE_PROJECT="hermes-tiered-e2e-$(id -u)-$(printf %s "$ROOT" | cksum | cut -d ' ' -f 1)"
@@ -37,12 +38,13 @@ materialize_pin() {
 }
 
 start() {
-  require_cmd docker; require_cmd git; require_cmd python3; require_cmd curl
+  require_cmd docker; require_cmd git; require_cmd openssl; require_cmd python3; require_cmd curl
   [[ ! -e "$ROOT" ]] || fail "refusing to reuse existing root: $ROOT (run teardown first)"
   mkdir -p "$ROOT"
   chmod 700 "$ROOT"
   trap 'teardown >/dev/null 2>&1 || true' ERR INT TERM
-  mkdir -p "$STATE" "$ROOT/hermes/plugins" "$ROOT/mnemosyne" "$ROOT/hindsight"
+  mkdir -p "$STATE" "$ROOT/hermes/plugins" "$ROOT/mnemosyne" "$ROOT/hindsight" "$TLS_DIR"
+  chmod 700 "$TLS_DIR"
   cp "$PINS" "$STATE/pins.json"
 
   verify_pin Hermes "$HERMES_SRC" 3ef6bbd201263d354fd83ec55b3c306ded2eb72a v2026.7.20 | tee "$STATE/versions.txt"
@@ -51,6 +53,30 @@ start() {
   materialize_pin hermes "$HERMES_SRC" 3ef6bbd201263d354fd83ec55b3c306ded2eb72a
   materialize_pin mnemosyne "$MNEMOSYNE_SRC" 4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce
   materialize_pin hindsight "$HINDSIGHT_SRC" 08995e3013858e705fb4ca27c0ade3a286ef4750
+
+  # A fresh, topology-owned CA and loopback server certificate are generated
+  # for every run. They are mounted read-only into the disposable container;
+  # no ambient or production trust material is consulted.
+  openssl req -x509 -new -nodes -newkey rsa:2048 -sha256 -days 1 \
+    -subj '/CN=hermes-tiered-memory-disposable-ca' \
+    -addext 'basicConstraints=critical,CA:TRUE' \
+    -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+    -keyout "$TLS_DIR/ca.key" -out "$TLS_DIR/ca.crt" >/dev/null 2>&1
+  openssl req -new -nodes -newkey rsa:2048 -sha256 \
+    -subj '/CN=127.0.0.1' \
+    -keyout "$TLS_DIR/hindsight.key" -out "$TLS_DIR/hindsight.csr" >/dev/null 2>&1
+  printf '%s\n' \
+    'basicConstraints=critical,CA:FALSE' \
+    'keyUsage=critical,digitalSignature,keyEncipherment' \
+    'extendedKeyUsage=serverAuth' \
+    'subjectAltName=IP:127.0.0.1' > "$TLS_DIR/hindsight.ext"
+  openssl x509 -req -sha256 -days 1 \
+    -in "$TLS_DIR/hindsight.csr" -CA "$TLS_DIR/ca.crt" -CAkey "$TLS_DIR/ca.key" \
+    -CAcreateserial -extfile "$TLS_DIR/hindsight.ext" -out "$TLS_DIR/hindsight.crt" >/dev/null 2>&1
+  rm -f -- "$TLS_DIR/hindsight.csr" "$TLS_DIR/hindsight.ext" "$TLS_DIR/ca.srl"
+  chmod 600 "$TLS_DIR/ca.key" "$TLS_DIR/hindsight.key"
+  chmod 644 "$TLS_DIR/ca.crt" "$TLS_DIR/hindsight.crt"
+  sha256sum "$TLS_DIR/ca.crt" | cut -d ' ' -f 1 > "$STATE/hindsight-ca-sha256"
 
   # Template home contains synthetic config only. Deliberately do not copy ~/.hermes.
   cat > "$ROOT/hermes/config.yaml" <<'YAML'
@@ -77,16 +103,20 @@ PY
     --build-arg INCLUDE_LOCAL_MODELS=true --build-arg PRELOAD_ML_MODELS=true \
     -t "$COMPOSE_PROJECT/hindsight:v0.8.6" "$ROOT/sources/hindsight" > "$STATE/image.txt"
   docker run -d --name "$CONTAINER" -p 127.0.0.1:0:8888 \
+    -v "$TLS_DIR/hindsight.crt:/tls/hindsight.crt:ro" \
+    -v "$TLS_DIR/hindsight.key:/tls/hindsight.key:ro" \
     -e HINDSIGHT_ENABLE_API=true -e HINDSIGHT_ENABLE_CP=false \
     -e HINDSIGHT_API_LLM_PROVIDER=ollama -e HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:9/v1 \
     -e HINDSIGHT_API_LLM_API_KEY=disposable-not-a-credential \
     -e HINDSIGHT_API_RETAIN_EXTRACTION_MODE=chunks \
     -e HINDSIGHT_API_EMBEDDING_PROVIDER=local \
-    "$COMPOSE_PROJECT/hindsight:v0.8.6" > "$STATE/container-id"
+    "$COMPOSE_PROJECT/hindsight:v0.8.6" \
+    hindsight-api --host 0.0.0.0 --port 8888 \
+      --ssl-keyfile /tls/hindsight.key --ssl-certfile /tls/hindsight.crt > "$STATE/container-id"
   # Discover the ephemeral loopback port and wait for the actual health endpoint.
   HINDSIGHT_PORT="$(docker port "$CONTAINER" 8888/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
   printf '%s\n' "$HINDSIGHT_PORT" > "$STATE/hindsight-port"
-  for _ in $(seq 1 90); do curl -fsS "http://127.0.0.1:$HINDSIGHT_PORT/health" > "$STATE/hindsight-health.json" && break; sleep 2; done
+  for _ in $(seq 1 90); do curl --cacert "$TLS_DIR/ca.crt" -fsS "https://127.0.0.1:$HINDSIGHT_PORT/health" > "$STATE/hindsight-health.json" && break; sleep 2; done
   [[ -s "$STATE/hindsight-health.json" ]] || { docker logs "$CONTAINER" > "$STATE/hindsight.log" 2>&1 || true; fail 'Hindsight health check timed out'; }
 
   # Exercise the real pinned Hermes CLI against the template home. Hermes has
@@ -97,14 +127,14 @@ PY
     fail 'Hermes version probe did not report v2026.7.20'
   printf '%s\n' "$ROOT" > "$STATE/READY"
   trap - ERR INT TERM
-  printf 'TOPOLOGY_READY root=%s hindsight=http://127.0.0.1:%s\n' "$ROOT" "$HINDSIGHT_PORT"
+  printf 'TOPOLOGY_READY root=%s hindsight=https://127.0.0.1:%s\n' "$ROOT" "$HINDSIGHT_PORT"
 }
 
 smoke() {
   [[ -f "$STATE/READY" ]] || fail 'topology is not started'
   require_cmd curl
   local port; port="$(<"$STATE/hindsight-port")"
-  curl --fail --silent "http://127.0.0.1:$port/health" > "$STATE/smoke-health.json"
+  curl --cacert "$TLS_DIR/ca.crt" --fail --silent "https://127.0.0.1:$port/health" > "$STATE/smoke-health.json"
   HERMES_HOME="$ROOT/hermes" MNEMOSYNE_DATA_DIR="$ROOT/mnemosyne" MNEMOSYNE_DB_PATH="$ROOT/mnemosyne/e2e.sqlite" \
     "$VENV/bin/python" - <<'PY' > "$STATE/smoke-mnemosyne.json"
 import json
@@ -115,7 +145,7 @@ PY
   grep -F '2026.7.20' "$STATE/hermes-health.txt" >/dev/null || fail 'Hermes smoke probe failed'
   [[ -s "$STATE/smoke-mnemosyne.json" ]] || fail 'Mnemosyne smoke probe failed'
   # Run the adapter's live contract test only against this disposable endpoint.
-  HINDSIGHT_E2E_URL="http://127.0.0.1:$port" \
+  HINDSIGHT_E2E_URL="https://127.0.0.1:$port" HINDSIGHT_E2E_CA="$TLS_DIR/ca.crt" \
     PYTHONPATH="$REPO_ROOT" "$VENV/bin/python" -m pytest -q \
       "$REPO_ROOT/tests/integration/test_hindsight_l2_live.py" > "$STATE/smoke-hindsight-adapter.txt"
   grep -F '1 passed' "$STATE/smoke-hindsight-adapter.txt" >/dev/null || \
@@ -135,16 +165,24 @@ adapter_test() {
 
 teardown() {
   if [[ -f "$STATE/container-id" ]]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
-  [[ "$ROOT" == /tmp/hermes-tiered-memory-e2e* || "$ROOT" == /tmp/tiered-memory-adapter-* ]] || \
+  [[ "$ROOT" == /tmp/hermes-tiered-memory-* || "$ROOT" == /tmp/tiered-memory-adapter-* ]] || \
     fail 'unsafe topology root; refusing deletion'
   rm -rf -- "$ROOT"
   printf 'TOPOLOGY_TORN_DOWN root=%s\n' "$ROOT"
 }
 
 test_twice() {
+  local first_ca_sha256=''
   for run in 1 2; do
     printf 'E2E_RUN %s/2\n' "$run"
     start
+    local ca_sha256
+    ca_sha256="$(<"$STATE/hindsight-ca-sha256")"
+    if [[ "$run" == 1 ]]; then
+      first_ca_sha256="$ca_sha256"
+    else
+      [[ "$ca_sha256" != "$first_ca_sha256" ]] || fail 'disposable CA was reused across runs'
+    fi
     smoke
     adapter_test
     teardown

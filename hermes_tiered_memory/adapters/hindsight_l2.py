@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,16 +30,26 @@ class HindsightL2Adapter(L2Adapter):
         *,
         timeout_seconds: float = 30.0,
         api_key: str | None = None,
+        verify_tls: bool = True,
+        ca_file: str | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("Hindsight base_url must be an absolute HTTP(S) URL")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not verify_tls and ca_file is not None:
+            raise ValueError("ca_file requires TLS verification")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         self._base_url = base_url.rstrip("/")
+        self._tls_verify: bool | ssl.SSLContext = (
+            ssl.create_default_context(cafile=ca_file) if ca_file is not None else verify_tls
+        )
         self._client = client or httpx.Client(
-            base_url=self._base_url, timeout=timeout_seconds, headers=headers
+            base_url=self._base_url,
+            timeout=timeout_seconds,
+            headers=headers,
+            verify=self._tls_verify,
         )
         self._owns_client = client is None
         self._closed = False

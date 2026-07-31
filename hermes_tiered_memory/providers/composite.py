@@ -380,7 +380,10 @@ class CompositeProvider(MemoryProvider):
         from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
 
         self.l2_adapter = HindsightL2Adapter(
-            self.protected_config.hindsight.to_url(), api_key=api_key
+            self.protected_config.hindsight.to_url(),
+            api_key=api_key,
+            verify_tls=self.protected_config.hindsight.verify_tls,
+            ca_file=self.protected_config.hindsight.ca_file,
         )
         logger.info("L2 Hindsight adapter initialized")
 
