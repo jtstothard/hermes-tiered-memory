@@ -372,14 +372,36 @@ class CompositeProvider(MemoryProvider):
         logger.info("L1 Mnemosyne adapter initialized for bank=%s", bank)
 
     def _initialize_l2(self) -> None:
-        """Initialize the L2 (Hindsight) adapter."""
-        if self.protected_config:
-            from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
-
-            self.l2_adapter = HindsightL2Adapter(self.protected_config.hindsight.to_url())
-            logger.info("L2 Hindsight adapter initialized")
-        else:
+        """Initialize the authenticated L2 (Hindsight) adapter."""
+        if not self.protected_config:
             raise RuntimeError("protected Hindsight configuration is unavailable")
+
+        api_key = self._resolve_hindsight_api_key()
+        from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+
+        self.l2_adapter = HindsightL2Adapter(
+            self.protected_config.hindsight.to_url(), api_key=api_key
+        )
+        logger.info("L2 Hindsight adapter initialized")
+
+    def _resolve_hindsight_api_key(self) -> str:
+        """Return the active profile's required Hindsight API key without exposing it."""
+        profiles = self._runtime_config.get("profiles")
+        if not isinstance(profiles, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        profile = profiles.get(self.active_profile_identity)
+        if not isinstance(profile, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        secrets = profile.get("secrets")
+        if not isinstance(secrets, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        hindsight = secrets.get("hindsight")
+        if not isinstance(hindsight, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        api_key = hindsight.get("api_key")
+        if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
+            raise RuntimeError("Tiered provider requires a valid active profile Hindsight credential")
+        return api_key
 
     def _initialize_outbox(self) -> None:
         """Initialize the durable outbox store."""
