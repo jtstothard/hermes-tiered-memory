@@ -6,9 +6,7 @@ import hashlib
 import inspect
 import json
 import logging
-import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +93,7 @@ class CompositeProvider(MemoryProvider):
         self._prefetched: dict[str, list[dict[str, Any]]] = {}
         self._initialized = False
         self._disabled = False
+        self._runtime_config: dict[str, Any] = {}
 
         logger.info(
             f"CompositeProvider initialized for profile={active_profile_identity}, "
@@ -107,14 +106,20 @@ class CompositeProvider(MemoryProvider):
         return "tiered-memory"
 
     def is_available(self) -> bool:
-        """Return whether this instance can expose its local provider tools."""
+        """Return whether the real composite implementation is loadable.
+
+        The optional Mnemosyne package is checked during initialization, when
+        Hermes has supplied the profile and protected endpoint configuration.
+        Registration must not instantiate any adapter or silently select a
+        local/mock substitute.
+        """
         if self._disabled:
             return False
         try:
-            from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
-            from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+            from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+            from hermes_tiered_memory.adapters.mnemosyne_l1 import MnemosyneL1Adapter
 
-            return bool(MockL2Adapter and SQLiteL1Adapter)
+            return bool(HindsightL2Adapter and MnemosyneL1Adapter)
         except (ImportError, ModuleNotFoundError):
             return False
 
@@ -148,7 +153,7 @@ class CompositeProvider(MemoryProvider):
             logger.exception("Failed to clean up disabled tiered memory provider")
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
-        """Initialize one local-adapter provider instance for Hermes."""
+        """Initialize the live, profile-scoped composite for one Hermes session."""
         if self._disabled:
             raise RuntimeError("Tiered provider is disabled after a previous initialization failure")
         hermes_home = kwargs.get("hermes_home")
@@ -166,15 +171,20 @@ class CompositeProvider(MemoryProvider):
         config = kwargs.get("config")
         if config is None and self.session is not None:
             config = getattr(self.session, "config", None)
-        if config is not None and not isinstance(config, dict):
+        # Pinned Hermes does not pass its loaded config through MemoryManager.
+        # A config-less invocation remains a valid lifecycle call, but it must
+        # fail closed before any adapter/network side effect rather than choose
+        # the old SQLite/mock topology.
+        if config is None:
             self._disable()
-            raise RuntimeError("Tiered provider configuration must be a mapping; startup aborted")
-        tiered = (config or {}).get("tiered", {})
-        if config is not None and (not isinstance(tiered, dict) or tiered.get("local_adapters") is not True):
+            raise RuntimeError("Tiered provider requires live tiered configuration")
+        if not isinstance(config, dict):
             self._disable()
-            raise RuntimeError(
-                "tiered.local_adapters: true is required when tiered provider configuration is supplied"
-            )
+            raise RuntimeError("Tiered provider configuration is required and must be a mapping")
+        tiered = config.get("tiered")
+        if not isinstance(tiered, dict):
+            self._disable()
+            raise RuntimeError("Tiered provider configuration requires a tiered mapping")
 
         self.session_id = session_id
         self.platform = str(kwargs.get("platform", self.platform or "cli"))
@@ -185,31 +195,13 @@ class CompositeProvider(MemoryProvider):
         self.chat_identity = str(kwargs.get("chat_id", self.chat_identity))
         self.thread_identity = str(kwargs.get("thread_id", self.thread_identity))
         self.active_profile_identity = profile
+        self._runtime_config = config
 
-        from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
-        from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
-        from hermes_tiered_memory.outbox.store import OutboxStore
-
-        data_dir = self.hermes_home / "profiles" / profile / "tiered-memory"
-        l1 = outbox = None
         try:
-            l1 = SQLiteL1Adapter(data_dir / "l1.db")
-            outbox = OutboxStore(data_dir / "outbox.db")
-            l2 = MockL2Adapter()
+            self.initialize_all()
         except Exception as exc:
-            try:
-                if l1 is not None:
-                    l1.close()
-                if outbox is not None:
-                    outbox.close()
-            except Exception:
-                logger.exception("Failed to clean up partially initialized tiered adapters")
             self._disable()
-            raise RuntimeError("Tiered local adapters could not initialize; startup aborted") from exc
-
-        self.l1_adapter = l1
-        self.l2_adapter = l2
-        self.outbox_store = outbox
+            raise RuntimeError("Tiered live adapters could not initialize; startup aborted") from exc
         self._initialized = True
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
@@ -313,26 +305,20 @@ class CompositeProvider(MemoryProvider):
         """Initialize all adapters and the promotion worker."""
         logger.info("Initializing composite provider components")
 
-        # Load protected configuration
-        self._load_protected_config()
-
-        # Initialize L1 adapter (Mnemosyne)
-        self._initialize_l1()
-
-        # Initialize L2 adapter (Hindsight)
-        self._initialize_l2()
-
-        # Initialize outbox
-        self._initialize_outbox()
-
-        # Initialize and start promotion worker
-        self._initialize_worker()
-
-        logger.info("Composite provider fully initialized")
+        try:
+            self._load_protected_config()
+            self._initialize_l1()
+            self._initialize_l2()
+            self._initialize_outbox()
+            self._initialize_worker()
+            logger.info("Composite provider fully initialized")
+        except Exception:
+            self.close()
+            raise
 
     def _load_protected_config(self) -> None:
         """Load and validate protected Hindsight endpoint configuration."""
-        config = self.session.config if self.session else {}
+        config = self._runtime_config or (self.session.config if self.session else {})
         tiered_config = config.get("tiered", {})
 
         protected_config_path = tiered_config.get("protected_config", {}).get("path")
@@ -363,21 +349,59 @@ class CompositeProvider(MemoryProvider):
 
     def _initialize_l1(self) -> None:
         """Initialize the L1 (Mnemosyne) adapter."""
-        from hermes_tiered_memory.adapters.l1 import L1Adapter
+        from hermes_tiered_memory.adapters.mnemosyne_l1 import MnemosyneL1Adapter
 
-        # For now, we'll use a mock L1 adapter
-        # In production, this would initialize Mnemosyne
-        logger.info("L1 adapter initialization (mock for now)")
+        tiered = self._runtime_config["tiered"]
+        mapping = tiered.get("bank_mapping", {})
+        if not isinstance(mapping, dict):
+            raise RuntimeError("tiered.bank_mapping must be a mapping")
+        bank = mapping.get(self.active_profile_identity, self.active_profile_identity)
+        if not isinstance(bank, str) or not bank:
+            raise RuntimeError("tiered bank mapping must resolve to a non-empty string")
+        channel_id = self.thread_identity or self.chat_identity or self.session_id
+        if not channel_id:
+            raise RuntimeError("Tiered provider requires a session, chat, or thread scope")
+        data_dir = self.hermes_home / "profiles" / self.active_profile_identity / "tiered-memory"
+        self.l1_adapter = MnemosyneL1Adapter(
+            data_dir=data_dir / "mnemosyne",
+            profile=self.active_profile_identity,
+            bank=bank,
+            session_id=self.session_id,
+            channel_id=channel_id,
+        )
+        logger.info("L1 Mnemosyne adapter initialized for bank=%s", bank)
 
     def _initialize_l2(self) -> None:
-        """Initialize the L2 (Hindsight) adapter."""
-        if self.protected_config:
-            from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+        """Initialize the authenticated L2 (Hindsight) adapter."""
+        if not self.protected_config:
+            raise RuntimeError("protected Hindsight configuration is unavailable")
 
-            self.l2_adapter = HindsightL2Adapter(self.protected_config.hindsight.to_url())
-            logger.info("L2 Hindsight adapter initialized")
-        else:
-            logger.warning("No protected config available for L2 adapter")
+        api_key = self._resolve_hindsight_api_key()
+        from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+
+        self.l2_adapter = HindsightL2Adapter(
+            self.protected_config.hindsight.to_url(), api_key=api_key
+        )
+        logger.info("L2 Hindsight adapter initialized")
+
+    def _resolve_hindsight_api_key(self) -> str:
+        """Return the active profile's required Hindsight API key without exposing it."""
+        profiles = self._runtime_config.get("profiles")
+        if not isinstance(profiles, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        profile = profiles.get(self.active_profile_identity)
+        if not isinstance(profile, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        secrets = profile.get("secrets")
+        if not isinstance(secrets, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        hindsight = secrets.get("hindsight")
+        if not isinstance(hindsight, dict):
+            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+        api_key = hindsight.get("api_key")
+        if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
+            raise RuntimeError("Tiered provider requires a valid active profile Hindsight credential")
+        return api_key
 
     def _initialize_outbox(self) -> None:
         """Initialize the durable outbox store."""
@@ -398,7 +422,30 @@ class CompositeProvider(MemoryProvider):
             logger.warning("Cannot start worker: outbox or L2 adapter not initialized")
             return
 
-        config = WorkerConfig()
+        tiered = self._runtime_config["tiered"]
+        retry = tiered.get("retry", {})
+        if not isinstance(retry, dict):
+            raise RuntimeError("tiered.retry must be a mapping")
+        batch_size = tiered.get("batch_size", 10)
+        max_attempts = retry.get("max_attempts", 5)
+        retry_delays = retry.get("backoff_seconds", [10, 30, 90, 300])
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size < 1
+            or isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts < 1
+            or not isinstance(retry_delays, list)
+            or not retry_delays
+            or any(isinstance(delay, bool) or not isinstance(delay, int) or delay < 0 for delay in retry_delays)
+        ):
+            raise RuntimeError("tiered worker settings are invalid")
+        config = WorkerConfig(
+            batch_size=batch_size,
+            retry_delays_seconds=retry_delays,
+            max_attempts_per_cycle=max_attempts,
+        )
         self.promotion_worker = PromotionWorker(
             outbox_store=self.outbox_store,
             l2_adapter=self.l2_adapter,
@@ -507,7 +554,7 @@ class CompositeProvider(MemoryProvider):
                 )
             except Exception as e:
                 logger.exception(f"Outbox enqueue error: {e}")
-                # Don't fail the request if enqueue fails - L1 is durable
+                raise RuntimeError("L1 write succeeded but durable L2 enqueue failed") from e
 
         return self._l1_record_to_dict(l1_record)
 
@@ -570,7 +617,7 @@ class CompositeProvider(MemoryProvider):
                 )
             except Exception as e:
                 logger.exception(f"L2 delete enqueue error: {e}")
-                # Don't fail the request if enqueue fails - L1 is durable
+                raise RuntimeError("L1 tombstone succeeded but durable L2 delete enqueue failed") from e
 
         return deleted
 
@@ -586,25 +633,43 @@ class CompositeProvider(MemoryProvider):
         }
 
     def close(self) -> None:
-        """Close the provider and release resources."""
+        """Stop promotion within Hermes' cap and close every owned resource.
+
+        The worker returns unstarted claimed rows to ``pending`` during stop.
+        A request already in flight can retain its lease until restart recovery;
+        it is never discarded merely because Hermes shutdown reached its cap.
+        """
         logger.info("Closing composite provider")
-
-        if self.promotion_worker:
-            self.promotion_worker.stop()
-            logger.info("Promotion worker stopped")
-
-        if self.l1_adapter:
-            self.l1_adapter.close()
-            logger.info("L1 adapter closed")
-
-        if self.l2_adapter:
-            self.l2_adapter.close()
-            logger.info("L2 adapter closed")
-
-        if self.outbox_store:
-            self.outbox_store.close()
-            logger.info("Outbox store closed")
-
+        errors: list[BaseException] = []
+        worker, l1, l2, outbox = (
+            self.promotion_worker,
+            self.l1_adapter,
+            self.l2_adapter,
+            self.outbox_store,
+        )
+        self.promotion_worker = None
+        self._initialized = False
+        worker_stopped = worker is None
+        if worker:
+            try:
+                worker.stop(drain_timeout_seconds=5.0)
+                worker_stopped = True
+            except Exception as exc:
+                errors.append(exc)
+        # Never close shared adapters beneath a live worker. Its durable lease
+        # stays recoverable by a subsequent process instead of turning a
+        # bounded shutdown into a use-after-close race.
+        if worker_stopped:
+            for label, adapter in (("L1", l1), ("L2", l2), ("outbox", outbox)):
+                if adapter is None:
+                    continue
+                try:
+                    adapter.close()
+                    logger.info("%s adapter closed", label)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise RuntimeError(f"Composite provider close failed: {errors[0]}") from errors[0]
         logger.info("Composite provider closed")
 
     def health(self) -> dict[str, Any]:
