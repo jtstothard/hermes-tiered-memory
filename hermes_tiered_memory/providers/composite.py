@@ -119,10 +119,9 @@ class CompositeProvider(MemoryProvider):
             return False
 
     def _disable(self) -> None:
-        """Unregister a failed provider from pinned Hermes' retained manager state."""
+        """Unregister a failed provider before best-effort resource cleanup."""
         self._disabled = True
         self._initialized = False
-        self.close()
         frame = inspect.currentframe()
         try:
             while frame is not None:
@@ -143,6 +142,10 @@ class CompositeProvider(MemoryProvider):
                 frame = frame.f_back
         finally:
             del frame
+        try:
+            self.close()
+        except Exception:
+            logger.exception("Failed to clean up disabled tiered memory provider")
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Initialize one local-adapter provider instance for Hermes."""
@@ -194,10 +197,13 @@ class CompositeProvider(MemoryProvider):
             outbox = OutboxStore(data_dir / "outbox.db")
             l2 = MockL2Adapter()
         except Exception as exc:
-            if l1 is not None:
-                l1.close()
-            if outbox is not None:
-                outbox.close()
+            try:
+                if l1 is not None:
+                    l1.close()
+                if outbox is not None:
+                    outbox.close()
+            except Exception:
+                logger.exception("Failed to clean up partially initialized tiered adapters")
             self._disable()
             raise RuntimeError("Tiered local adapters could not initialize; startup aborted") from exc
 
