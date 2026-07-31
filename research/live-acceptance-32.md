@@ -2,82 +2,66 @@
 
 Date: 2026-07-31
 Repository: `jtstothard/hermes-tiered-memory`
-Revision: `ee6f7dc64baff7924de64c0054bdb1b3e55406e0` plus the safe disposable-topology teardown fix in this worktree.
+Revision: `d0043f7` plus the disposable live composite probe in this worktree.
 
 ## Result
 
-**STOPPED — the disposable topology is healthy, but it cannot initialize the composite provider against both live tiers without violating the protected-endpoint contract.** No production Hermes home, credential, endpoint, or user data was read or used.
+**PARTIAL — live plugin loading, lifecycle, HTTPS transport, and provenance round-trip passed. Controlled SIGKILL recovery was not executed against the live composite process; the task is stopped rather than presenting local crash tests as live evidence.** No production Hermes home, credential, endpoint, or user data was used.
 
-The task explicitly permits stopping with exact blocking evidence. This evidence is intentionally sanitized: it includes no reusable credential values, container IDs, or full local paths.
-
-## Pinned disposable topology evidence
-
-The topology started from source commits pinned in `e2e-topology/pins.json`:
+## Pinned disposable topology
 
 | Component | Version | Pinned commit | Result |
 |---|---:|---|---|
-| Hermes | v2026.7.20 | `3ef6bbd201263d354fd83ec55b3c306ded2eb72a` | started/version-probed |
+| Hermes | v2026.7.20 | `3ef6bbd201263d354fd83ec55b3c306ded2eb72a` | started/version-probed; plugin loaded through real manager |
 | Mnemosyne | v3.14.0 | `4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce` | installed and live-adapter tested |
-| Hindsight | v0.8.6 | `08995e3013858e705fb4ca27c0ade3a286ef4750` | built locally and health-checked |
+| Hindsight | v0.8.6 | `08995e3013858e705fb4ca27c0ade3a286ef4750` | built locally, HTTPS health-checked, live adapter exercised |
 
-Commands run, with a fresh disposable root:
-
-```bash
-TOPOLOGY_ROOT=/tmp/hermes-tiered-memory-live-acceptance-<id> ./e2e-topology/topology.sh start
-TOPOLOGY_ROOT=/tmp/hermes-tiered-memory-live-acceptance-<id> ./e2e-topology/topology.sh smoke
-TOPOLOGY_ROOT=/tmp/hermes-tiered-memory-live-acceptance-<id> ./e2e-topology/topology.sh adapter-test
-HINDSIGHT_E2E_URL=http://127.0.0.1:<ephemeral-port> python -m pytest -q \
-  tests/integration/test_hindsight_l2_live.py
-```
-
-Observed results:
+## Commands and results
 
 ```text
-TOPOLOGY_READY
-SMOKE_PASS hermes=healthy mnemosyne=healthy hindsight=healthy adapter=healthy
-ADAPTER_PASS mnemosyne=l1
-1 passed  # live Hindsight adapter test
+ROOT=/tmp/hermes-tiered-memory-live32-<run>
+TOPOLOGY_ROOT=$ROOT ./e2e-topology/topology.sh start
+TOPOLOGY_ROOT=$ROOT ./e2e-topology/topology.sh smoke
+TOPOLOGY_ROOT=$ROOT ./e2e-topology/topology.sh adapter-test
+PYTHONPATH=$ROOT/sources/hermes:$PWD $ROOT/venv/bin/python ./e2e-topology/live_composite_acceptance.py
+TOPOLOGY_ROOT=$ROOT ./e2e-topology/topology.sh teardown
 ```
 
-The Hindsight health response reported `status: healthy` and `database: connected`.
+Observed:
+
+```text
+TOPOLOGY_READY ... hindsight=https://127.0.0.1:<ephemeral-port>
+SMOKE_PASS hermes=healthy mnemosyne=healthy hindsight=healthy adapter=healthy
+ADAPTER_PASS mnemosyne=l1
+COMPOSITE_ACCEPTANCE_PASS load=1 lifecycle=store-retrieve-delete wire_fidelity=preserved
+TOPOLOGY_TORN_DOWN ...
+```
+
+The probe starts the real pinned Hermes `MemoryManager`, loads `tiered-memory` through `plugins.memory`, adds the same provider twice, and asserts exactly one manager provider and three exposed tools. It then performs store, L1 retrieve, live worker promotion, live Hindsight recall, tombstone delete, live Hindsight delete, and L1 tombstone verification. The Hindsight metadata envelope preserves nested values including a list and null.
+
+The initial HTTPS startup emitted transient TLS broken-pipe messages while the API server became ready; the health retry subsequently passed. These messages were not treated as a pass signal.
 
 ## Acceptance matrix
 
-| Criterion | Result | Exact evidence |
+| Criterion | Result | Evidence |
 |---|---|---|
-| LOAD: real `MemoryManager` loads one composite provider | **BLOCKED** | Pinned `MemoryManager.initialize_all()` calls `provider.initialize(session_id, **kwargs)` but the pinned agent-init call does not pass the loaded config mapping. `CompositeProvider.initialize()` correctly rejects a config-less call with `Tiered provider requires live tiered configuration`; existing pinned-Hermes contract test proves the failed provider is removed before tool exposure. |
-| LIFECYCLE: store/retrieve/revise/delete through both live tiers | **BLOCKED** | The composite cannot initialize because its protected L2 configuration requires HTTPS, while the disposable Hindsight API is deliberately exposed only on ephemeral loopback HTTP. Making the composite accept this endpoint would weaken its fail-closed security contract. |
-| WIRE FIDELITY: provenance through live Hindsight | **PARTIAL** | The concrete live `HindsightL2Adapter` test passed against the disposable Hindsight server and verifies the nested metadata envelope round-trip. It is not a composite-provider proof because initialization is blocked before L2 wiring. |
-| CRASH RECOVERY: SIGKILL/restart/drain/stale checks | **BLOCKED** | No safe composite process can be started. Existing crash/recovery coverage remains local SQLite/fake-L2 only and must not be presented as a live two-tier result. |
-| ROLLBACK: restore pre-composite template and clean teardown | **PASS** | The disposable template stayed on `memory.provider: mnemosyne`; the composite was never written into it. `topology.sh teardown` removed the active disposable root and `test ! -e "$ROOT"` passed. A regression test now covers task-specific disposable root names. |
+| LOAD: real `MemoryManager` loads one composite provider | **PASS** | `live_composite_acceptance.py`; real pinned manager reported exactly one provider after duplicate registration and exposed three composite tools. |
+| LIFECYCLE: store/retrieve/revise/delete through both live tiers | **PASS for store/retrieve/delete** | Live probe performed L1 store/retrieve, asynchronous live Hindsight promotion, tombstone delete, and live Hindsight deletion. The pinned live Hindsight adapter test also passed in the smoke command. Revision is asserted on the live Mnemosyne adapter probe. |
+| WIRE FIDELITY: provenance through live Hindsight | **PASS** | Live Hindsight recall matched the stable Mnemosyne identity and preserved nested provenance metadata. |
+| CRASH RECOVERY: SIGKILL/restart/drain/stale checks | **BLOCKED** | Not executed against the live composite process. Existing local worker tests cover restart persistence and stale-upsert/delete semantics, but are not live two-tier evidence and are not promoted here. |
+| ROLLBACK: restore template and clean teardown | **PASS** | Template is synthetic and disposable; teardown removed the topology root and container. `test_topology_teardown.py` covers both generic disposable roots and HTTPS CA/server material. |
 
-## Security-gate probe
+## Local gate
 
-A synthetic protected configuration targeting the topology's loopback HTTP API was checked before any composite attempt. It was rejected with:
-
-```text
-PRECHECK_BLOCKED Invalid scheme: http
-```
-
-This is expected and correct: `HindsightEndpointConfig` only admits `https`. The topology's HTTP listener is suitable for direct adapter protocol testing but not for the protected composite endpoint contract.
-
-## Local and CI-equivalent gate
-
-The full declared CI-equivalent command was rerun after the teardown regression fix:
+The repository's configured default pytest addopts require `pytest-cov`, which is absent from the ambient interpreter; the raw command therefore exits with `unrecognized arguments: --cov...`. With repository addopts disabled, the full suite passed:
 
 ```text
-141 passed, 52 warnings
+python3 -m pytest -o addopts='' -q
+154 passed, 40 warnings in 11.39s
 ```
 
-The warnings are pre-existing `datetime.utcnow()` deprecations and unclosed SQLite `ResourceWarning`s; they do not change the pass exit code. The live adapter integration test independently passed.
+The warnings are existing datetime deprecations in mock adapters. The live integration test without topology variables correctly skipped (`1 skipped`). The disposable smoke command independently ran the live Hindsight adapter test and reported `1 passed` internally.
 
-The repository CI workflow runs `python -m pytest -q` with the declared `[test]` extra. The same command was run in a fresh disposable virtualenv.
+## Exact follow-up blocker
 
-## Required follow-up
-
-Do not relax HTTPS or inject an ambient config to force this task green. A subsequent acceptance task needs:
-
-1. a disposable HTTPS Hindsight endpoint with a test CA accepted by the protected configuration; and
-2. a pinned-Hermes configuration-propagation seam (or an approved plugin-owned configuration bridge) that supplies the validated `tiered` mapping to `MemoryProvider.initialize()` without core changes that bypass the provider lifecycle.
-
-Only after those two prerequisites are proven may the composite lifecycle and controlled SIGKILL scenarios be executed.
+Run a separate controlled live crash harness that starts the real composite worker, SIGKILLs it during promotion, restarts with the same disposable Hermes home, drains the durable outbox, and verifies no resurrection after stale upsert/delete. Do not claim the crash criterion from the local worker suite alone.
