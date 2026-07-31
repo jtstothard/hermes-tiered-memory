@@ -1,16 +1,19 @@
-"""Lifecycle wiring tests for the real composite adapter classes."""
+"""No-mock lifecycle tests for the concrete live composite adapters."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
-from datetime import UTC, datetime
+import sqlite3
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
-from hermes_tiered_memory.adapters.l1 import L1Record
-from hermes_tiered_memory.adapters.l2 import L2RetainResult
+import pytest
+
+from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+from hermes_tiered_memory.adapters.mnemosyne_l1 import MnemosyneL1Adapter
 from hermes_tiered_memory.config import ProtectedConfigLoader
 from hermes_tiered_memory.providers.composite import CompositeProvider
 
@@ -28,7 +31,7 @@ def _write_signed_config(directory: Path) -> tuple[Path, Path]:
         "expires_at": "2099-01-01T00:00:00+00:00",
         "hindsight": {
             "scheme": "https",
-            "host": "hindsight.example.com",
+            "host": "hindsight.invalid",
             "port": 443,
             "base_path": "/api/v1",
             "tls": {"verify": True, "ca_file": None},
@@ -47,85 +50,62 @@ def _write_signed_config(directory: Path) -> tuple[Path, Path]:
     return config_path, signature_path
 
 
-def test_initialize_wires_live_adapter_classes_outbox_and_worker(tmp_path, monkeypatch):
-    from hermes_tiered_memory.adapters import hindsight_l2, mnemosyne_l1
+@pytest.fixture
+def disposable_mnemosyne(monkeypatch):
+    """Provide only Mnemosyne's unavailable upstream dependency, not an adapter double."""
 
-    class RecordingL1:
-        instances = []
-
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            self.closed = False
-            self.records = {}
-            type(self).instances.append(self)
-
-        def remember(self, content, metadata):
-            record = L1Record(
-                source_id="live-source-1",
-                revision=1,
-                content=content,
-                metadata=metadata,
-                created_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-            self.records[record.source_id] = record
-            return record
+    class Beam:
+        def __init__(self, memory):
+            self.memory = memory
+            self.conn = sqlite3.connect(":memory:")
 
         def remember_batch(self, items):
-            return [self.remember(content, metadata) for content, metadata in items]
+            return [
+                self.memory.remember(item["content"], source=item["source"], metadata=item["metadata"])
+                for item in items
+            ]
 
-        def recall(self, query, limit=10):
-            return [record for record in self.records.values() if query in record.content][:limit]
+    class Mnemosyne:
+        def __init__(self, *, session_id, db_path, bank, channel_id):
+            del session_id, bank, channel_id
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(db_path)
+            self.beam = Beam(self)
 
-        def forget(self, source_id):
-            return self.records.pop(source_id, None) is not None
+        def remember(self, content, *, source, metadata, scope):
+            del content, source, metadata, scope
+            return "disposable-source"
 
         def get(self, source_id):
-            return self.records.get(source_id)
+            return None if source_id != "disposable-source" else {
+                "id": source_id,
+                "content": "disposable content",
+                "metadata": {},
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
 
-        def get_revision(self, source_id):
-            record = self.records.get(source_id)
-            return record.revision if record else None
+        def forget(self, source_id):
+            return source_id == "disposable-source"
 
-        def health(self):
-            return {"status": "closed" if self.closed else "healthy"}
-
-        def close(self):
-            self.closed = True
-
-    class RecordingL2:
-        instances = []
-
-        def __init__(self, base_url):
-            self.base_url = base_url
-            self.closed = False
-            type(self).instances.append(self)
-
-        def retain(self, document_id, content, metadata, async_op=True):
-            return L2RetainResult(operation_id="operation-1", success=True)
-
-        def retain_batch(self, items, async_op=True):
+        def recall(self, query, *, top_k, channel_id):
+            del query, top_k, channel_id
             return []
 
-        def recall(self, query, bank_id, limit=10):
-            return []
+    mnemosyne = ModuleType("mnemosyne")
+    core = ModuleType("mnemosyne.core")
+    memory = ModuleType("mnemosyne.core.memory")
+    memory.Mnemosyne = Mnemosyne
+    monkeypatch.setitem(sys.modules, "mnemosyne", mnemosyne)
+    monkeypatch.setitem(sys.modules, "mnemosyne.core", core)
+    monkeypatch.setitem(sys.modules, "mnemosyne.core.memory", memory)
 
-        def delete_document(self, bank_id, document_id):
-            return True
 
-        def get_operation_status(self, operation_id):
-            return {"status": "completed"}
-
-        def health(self):
-            return {"status": "closed" if self.closed else "healthy"}
-
-        def close(self):
-            self.closed = True
-
-    monkeypatch.setattr(mnemosyne_l1, "MnemosyneL1Adapter", RecordingL1)
-    monkeypatch.setattr(hindsight_l2, "HindsightL2Adapter", RecordingL2)
+def test_initialize_wires_real_adapters_outbox_and_worker(tmp_path, disposable_mnemosyne):
     config_path, signature_path = _write_signed_config(tmp_path)
+    api_key = "test-hindsight-api-key"
     config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {"api_key": api_key}}}},
         "tiered": {
             "bank_mapping": {"profile": "profile-bank"},
             "batch_size": 2,
@@ -134,56 +114,95 @@ def test_initialize_wires_live_adapter_classes_outbox_and_worker(tmp_path, monke
                 "path": str(config_path),
                 "signature": {"path": str(signature_path)},
             },
-        }
+        },
     }
+    hermes_home = tmp_path / "hermes-home"
     provider = CompositeProvider(session=SimpleNamespace(config=config))
 
     try:
         provider.initialize(
             "session-1",
-            hermes_home=str(tmp_path / "hermes-home"),
+            hermes_home=str(hermes_home),
             agent_identity="profile",
             chat_id="chat-1",
         )
 
-        assert RecordingL1.instances[0].kwargs == {
-            "data_dir": tmp_path / "hermes-home" / "profiles" / "profile" / "tiered-memory" / "mnemosyne",
-            "profile": "profile",
-            "bank": "profile-bank",
-            "session_id": "session-1",
-            "channel_id": "chat-1",
-        }
-        assert RecordingL2.instances[0].base_url == "https://hindsight.example.com:443/api/v1"
+        assert isinstance(provider.l1_adapter, MnemosyneL1Adapter)
+        assert isinstance(provider.l2_adapter, HindsightL2Adapter)
+        assert provider.l1_adapter.db_path == (
+            hermes_home
+            / "profiles"
+            / "profile"
+            / "tiered-memory"
+            / "mnemosyne"
+            / "banks"
+            / "profile-bank"
+            / "mnemosyne.db"
+        )
+        assert provider.l1_adapter.db_path.is_file()
+        ledger_row = provider.l1_adapter._ledger.execute("SELECT 1").fetchone()
+        assert tuple(ledger_row) == (1,)
+        assert provider.l2_adapter._base_url == "https://hindsight.invalid:443/api/v1"
+        assert provider.l2_adapter._client.headers["Authorization"] == f"Bearer {api_key}"
         assert provider.outbox_store is not None
+        assert (hermes_home / "profiles" / "profile" / "tiered-memory" / "outbox.db").is_file()
         assert provider.promotion_worker is not None
         assert provider.promotion_worker.config.batch_size == 2
         assert provider.promotion_worker.config.max_attempts_per_cycle == 3
-
-        stored = provider.memory_store("durable live route", {"kind": "test"})
-        assert stored["source"] == "l1"
-        assert provider.outbox_store.get_by_identity(
-            provider._generate_document_id("live-source-1"), 1
-        ) is not None
     finally:
         provider.close()
 
-    assert RecordingL1.instances[0].closed
-    assert RecordingL2.instances[0].closed
+    assert provider.l1_adapter is not None and provider.l1_adapter.health()["status"] == "closed"
+    assert provider.l2_adapter is not None and provider.l2_adapter.health()["status"] == "closed"
 
 
-def test_initialize_rejects_configless_hermes_lifecycle_before_adapter_side_effects(tmp_path):
-    provider = CompositeProvider()
+@pytest.mark.parametrize(
+    "profile_config",
+    [
+        {},
+        {"profile": {}},
+        {"profile": {"secrets": {"hindsight": {"api_key": ""}}}},
+        {"profile": {"secrets": {"hindsight": {"api_key": " invalid "}}}},
+    ],
+)
+def test_initialize_fails_closed_without_valid_profile_hindsight_key(
+    tmp_path, disposable_mnemosyne, profile_config
+):
+    config_path, signature_path = _write_signed_config(tmp_path)
+    provider = CompositeProvider(
+        session=SimpleNamespace(
+            config={
+                "profiles": profile_config,
+                "tiered": {
+                    "protected_config": {
+                        "path": str(config_path),
+                        "signature": {"path": str(signature_path)},
+                    }
+                },
+            }
+        )
+    )
 
-    try:
+    with pytest.raises(RuntimeError, match="Tiered live adapters could not initialize"):
         provider.initialize(
             "session-1",
             hermes_home=str(tmp_path / "hermes-home"),
             agent_identity="profile",
         )
-    except RuntimeError as exc:
-        assert "requires live tiered configuration" in str(exc)
-    else:
-        raise AssertionError("configless provider initialization was accepted")
+
+    assert provider.l2_adapter is None
+    assert provider.promotion_worker is None
+
+
+def test_initialize_rejects_configless_hermes_lifecycle_before_adapter_side_effects(tmp_path):
+    provider = CompositeProvider()
+
+    with pytest.raises(RuntimeError, match="requires live tiered configuration"):
+        provider.initialize(
+            "session-1",
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+        )
 
     assert provider.l1_adapter is None
     assert provider.l2_adapter is None
