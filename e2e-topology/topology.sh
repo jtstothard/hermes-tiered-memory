@@ -135,7 +135,7 @@ adapter_test() {
 
 teardown() {
   if [[ -f "$STATE/container-id" ]]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
-  [[ "$ROOT" == /tmp/hermes-tiered-memory-e2e* || "$ROOT" == /tmp/tiered-memory-adapter-* ]] || \
+  [[ "$ROOT" == /tmp/hermes-tiered-memory-* || "$ROOT" == /tmp/tiered-memory-adapter-* ]] || \
     fail 'unsafe topology root; refusing deletion'
   rm -rf -- "$ROOT"
   printf 'TOPOLOGY_TORN_DOWN root=%s\n' "$ROOT"

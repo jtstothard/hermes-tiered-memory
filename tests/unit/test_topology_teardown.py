@@ -1,0 +1,51 @@
+"""Safety and cleanup behavior for the disposable topology script."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import uuid
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / "e2e-topology" / "topology.sh"
+
+
+def _run_teardown(root: Path) -> subprocess.CompletedProcess[str]:
+    environment = os.environ | {"TOPOLOGY_ROOT": str(root)}
+    return subprocess.run(
+        [str(SCRIPT), "teardown"],
+        cwd=REPO_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_teardown_removes_any_disposable_hermes_tiered_memory_root(tmp_path: Path) -> None:
+    root = Path("/tmp") / f"hermes-tiered-memory-acceptance-{uuid.uuid4().hex}"
+    root.mkdir()
+    (root / "state").mkdir()
+    (root / "synthetic-state").write_text("safe to delete")
+
+    result = _run_teardown(root)
+
+    assert result.returncode == 0, result.stderr
+    assert not root.exists()
+    assert "TOPOLOGY_TORN_DOWN" in result.stdout
+
+
+def test_teardown_refuses_unowned_root(tmp_path: Path) -> None:
+    root = tmp_path / "not-disposable"
+    root.mkdir()
+    marker = root / "must-remain"
+    marker.write_text("do not delete")
+
+    result = _run_teardown(root)
+
+    assert result.returncode != 0
+    assert root.exists()
+    assert marker.exists()
+    assert "unsafe topology root" in result.stderr
