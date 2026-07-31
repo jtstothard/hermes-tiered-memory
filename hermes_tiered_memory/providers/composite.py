@@ -93,6 +93,7 @@ class CompositeProvider(MemoryProvider):
         self.agent_context = ""
         self._prefetched: dict[str, list[dict[str, Any]]] = {}
         self._initialized = False
+        self._disabled = False
 
         logger.info(
             f"CompositeProvider initialized for profile={active_profile_identity}, "
@@ -105,7 +106,9 @@ class CompositeProvider(MemoryProvider):
         return "tiered-memory"
 
     def is_available(self) -> bool:
-        """Check local dependencies without reading ambient config or making network calls."""
+        """Return whether this instance can expose its local provider tools."""
+        if self._disabled:
+            return False
         try:
             from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
             from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
@@ -114,26 +117,39 @@ class CompositeProvider(MemoryProvider):
         except (ImportError, ModuleNotFoundError):
             return False
 
+    def _disable(self) -> None:
+        """Make a failed instance inert because Hermes retains failed providers."""
+        self._disabled = True
+        self._initialized = False
+        self.close()
+
     def initialize(self, session_id: str, **kwargs: Any) -> None:
-        """Initialize one fail-closed local-adapter provider instance for Hermes."""
+        """Initialize one local-adapter provider instance for Hermes."""
+        if self._disabled:
+            raise RuntimeError("Tiered provider is disabled after a previous initialization failure")
         hermes_home = kwargs.get("hermes_home")
         profile = kwargs.get("agent_identity")
         if not isinstance(hermes_home, str) or not hermes_home:
+            self._disable()
             raise RuntimeError("Hermes hermes_home is required; composite provider startup aborted")
         if not isinstance(profile, str) or not profile:
+            self._disable()
             raise RuntimeError("Hermes agent_identity is required; composite provider startup aborted")
         if not isinstance(session_id, str) or not session_id:
+            self._disable()
             raise RuntimeError("Hermes session_id is required; composite provider startup aborted")
 
         config = kwargs.get("config")
         if config is None and self.session is not None:
             config = getattr(self.session, "config", None)
         if config is not None and not isinstance(config, dict):
+            self._disable()
             raise RuntimeError("Tiered provider configuration must be a mapping; startup aborted")
         tiered = (config or {}).get("tiered", {})
-        if not isinstance(tiered, dict) or tiered.get("local_adapters") is not True:
+        if config is not None and (not isinstance(tiered, dict) or tiered.get("local_adapters") is not True):
+            self._disable()
             raise RuntimeError(
-                "tiered.local_adapters: true is required for the disposable local-adapter integration"
+                "tiered.local_adapters: true is required when tiered provider configuration is supplied"
             )
 
         self.session_id = session_id
@@ -161,6 +177,7 @@ class CompositeProvider(MemoryProvider):
                 l1.close()
             if outbox is not None:
                 outbox.close()
+            self._disable()
             raise RuntimeError("Tiered local adapters could not initialize; startup aborted") from exc
 
         self.l1_adapter = l1
@@ -170,6 +187,8 @@ class CompositeProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Expose one non-reserved namespace through the Hermes manager."""
+        if self._disabled:
+            return []
         return [
             {
                 "name": "tiered_memory_search",

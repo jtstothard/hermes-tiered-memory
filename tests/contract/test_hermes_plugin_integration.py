@@ -88,13 +88,14 @@ def test_pinned_hermes_loader_and_manager_lifecycle(tmp_path, monkeypatch, pinne
     manager.add_provider(provider)
     assert [item.name for item in manager.providers] == ["tiered-memory"]
 
+    # This mirrors the pinned agent-init path: it supplies runtime scope but
+    # does not pass the loaded Hermes configuration to MemoryManager.
     manager.initialize_all(
         session_id="session-1",
         hermes_home=str(tmp_path / "hermes"),
         platform="cli",
         agent_context="primary",
         agent_identity="disposable",
-        config={"tiered": {"local_adapters": True}},
     )
     assert provider.health()["l1"]["status"] == "healthy"
     assert [schema["name"] for schema in manager.get_all_tool_schemas()] == [
@@ -114,6 +115,49 @@ def test_pinned_hermes_loader_and_manager_lifecycle(tmp_path, monkeypatch, pinne
     manager.shutdown_all()
     assert provider.health()["l1"]["status"] == "closed"
     assert provider.health()["l2"]["status"] == "closed"
+
+
+def test_pinned_manager_disables_failed_provider_before_tool_exposure(
+    tmp_path, monkeypatch, pinned_hermes
+):
+    from agent.memory_manager import MemoryManager, inject_memory_provider_tools
+    from hermes_tiered_memory.adapters import sqlite_l1
+    from hermes_tiered_memory.providers.composite import CompositeProvider
+
+    class FailingSQLiteL1Adapter:
+        def __init__(self, path):
+            raise OSError(f"cannot open {path}")
+
+    monkeypatch.setattr(sqlite_l1, "SQLiteL1Adapter", FailingSQLiteL1Adapter)
+    provider = CompositeProvider()
+    manager = MemoryManager()
+    manager.add_provider(provider)
+
+    # As in agent-init, no config mapping is forwarded to MemoryManager.
+    manager.initialize_all(
+        session_id="session-1",
+        hermes_home=str(tmp_path / "hermes"),
+        platform="cli",
+        agent_context="primary",
+        agent_identity="disposable",
+    )
+
+    assert manager.providers == [provider]
+    assert not provider.is_available()
+    assert manager.get_all_tool_schemas() == []
+
+    agent = type(
+        "Agent",
+        (),
+        {
+            "_memory_manager": manager,
+            "tools": [],
+            "enabled_toolsets": ["memory"],
+            "valid_tool_names": set(),
+        },
+    )()
+    assert inject_memory_provider_tools(agent) == 0
+    assert agent.tools == []
 
 
 def test_plugin_and_runtime_fail_closed_without_partial_registration(

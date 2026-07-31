@@ -37,7 +37,7 @@ tests/
 
 ### 1. One-Provider Boundary
 
-The composite is designed to present as a single Hermes MemoryProvider once live integration is implemented. In the current prototype it does not register with Hermes (`CompositeProvider` does not implement the pinned `MemoryProvider` ABC). Mnemosyne and Hindsight adapters are internal implementation details and do not register their own tools with Hermes.
+The composite presents as a single pinned-Hermes `MemoryProvider` and registers through the plugin loader. Its current integration uses disposable SQLite L1 and mock L2 adapters; Mnemosyne and Hindsight adapters remain internal implementation details and do not register their own Hermes tools.
 
 ### 2. Cache-First, Write-Through Policy
 
