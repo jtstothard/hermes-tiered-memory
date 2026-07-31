@@ -4,7 +4,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+*.egg-info/
 *.sqlite
 *.db
 *.log
+.coverage
+htmlcov/
 .DS_Store
