@@ -69,6 +69,7 @@ asyncio_mode = "auto"
 markers = [
     "unit: Unit tests (no external services)",
     "contract: Contract tests (deterministic, no live services)",
+    "integration: Disposable live-service integration tests",
 ]
 
 [tool.coverage.run]

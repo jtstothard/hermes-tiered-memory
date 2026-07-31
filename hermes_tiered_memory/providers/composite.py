@@ -133,14 +133,11 @@ class CompositeProvider:
 
     def _initialize_l2(self) -> None:
         """Initialize the L2 (Hindsight) adapter."""
-        from hermes_tiered_memory.adapters.l2 import L2Adapter
-
-        # For now, we'll use a mock L2 adapter
-        # In production, this would initialize Hindsight client
         if self.protected_config:
-            logger.info(
-                f"L2 adapter would connect to {self.protected_config.hindsight.to_url()}"
-            )
+            from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
+
+            self.l2_adapter = HindsightL2Adapter(self.protected_config.hindsight.to_url())
+            logger.info("L2 Hindsight adapter initialized")
         else:
             logger.warning("No protected config available for L2 adapter")
 

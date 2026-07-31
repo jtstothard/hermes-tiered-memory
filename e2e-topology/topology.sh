@@ -59,6 +59,7 @@ YAML
 
   python3 -m venv "$VENV"
   "$VENV/bin/pip" install --quiet -e "$ROOT/sources/mnemosyne"
+  "$VENV/bin/pip" install --quiet -e "$REPO_ROOT[test]"
   "$VENV/bin/python" - <<PY
 import os, sqlite3
 os.environ['MNEMOSYNE_DATA_DIR'] = '$ROOT/mnemosyne'
@@ -76,6 +77,7 @@ PY
     -e HINDSIGHT_ENABLE_API=true -e HINDSIGHT_ENABLE_CP=false \
     -e HINDSIGHT_API_LLM_PROVIDER=ollama -e HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:9/v1 \
     -e HINDSIGHT_API_LLM_API_KEY=disposable-not-a-credential \
+    -e HINDSIGHT_API_RETAIN_EXTRACTION_MODE=chunks \
     -e HINDSIGHT_API_EMBEDDING_PROVIDER=local \
     "$COMPOSE_PROJECT/hindsight:v0.8.6" > "$STATE/container-id"
   # Discover the ephemeral loopback port and wait for the actual health endpoint.
@@ -109,12 +111,18 @@ print(json.dumps({'alpha': len(recall('vegan recipe notebook')), 'beta': len(rec
 PY
   grep -F '2026.7.20' "$STATE/hermes-health.txt" >/dev/null || fail 'Hermes smoke probe failed'
   [[ -s "$STATE/smoke-mnemosyne.json" ]] || fail 'Mnemosyne smoke probe failed'
-  printf 'SMOKE_PASS hermes=healthy mnemosyne=healthy hindsight=healthy\n'
+  # Run the adapter's live contract test only against this disposable endpoint.
+  HINDSIGHT_E2E_URL="http://127.0.0.1:$port" \
+    PYTHONPATH="$REPO_ROOT" "$VENV/bin/python" -m pytest -q \
+      "$REPO_ROOT/tests/integration/test_hindsight_l2_live.py" > "$STATE/smoke-hindsight-adapter.txt"
+  grep -F '1 passed' "$STATE/smoke-hindsight-adapter.txt" >/dev/null || \
+    fail 'Hindsight adapter live smoke probe failed'
+  printf 'SMOKE_PASS hermes=healthy mnemosyne=healthy hindsight=healthy adapter=healthy\n'
 }
 
 teardown() {
   if [[ -f "$STATE/container-id" ]]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
-  [[ "$ROOT" == /tmp/hermes-tiered-memory-e2e* ]] || fail 'unsafe topology root; refusing deletion'
+  [[ "$ROOT" == /tmp/hermes-tiered-memory-* ]] || fail 'unsafe topology root; refusing deletion'
   rm -rf -- "$ROOT"
   printf 'TOPOLOGY_TORN_DOWN root=%s\n' "$ROOT"
 }
