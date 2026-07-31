@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import shutil
 import subprocess
 import sys
@@ -65,7 +64,9 @@ def pinned_hermes(tmp_path_factory, monkeypatch):
         )
 
 
-def test_pinned_hermes_loader_and_manager_lifecycle(tmp_path, monkeypatch, pinned_hermes):
+def test_pinned_hermes_loader_fails_closed_without_runtime_config(
+    tmp_path, monkeypatch, pinned_hermes
+):
     from agent.memory_manager import MemoryManager
     from plugins.memory import load_memory_provider
 
@@ -88,8 +89,9 @@ def test_pinned_hermes_loader_and_manager_lifecycle(tmp_path, monkeypatch, pinne
     manager.add_provider(provider)
     assert [item.name for item in manager.providers] == ["tiered-memory"]
 
-    # This mirrors the pinned agent-init path: it supplies runtime scope but
-    # does not pass the loaded Hermes configuration to MemoryManager.
+    # The pinned manager does not forward the loaded config mapping. A live
+    # composite must refuse this incomplete lifecycle rather than substituting
+    # the previous SQLite/mock implementation.
     manager.initialize_all(
         session_id="session-1",
         hermes_home=str(tmp_path / "hermes"),
@@ -97,30 +99,16 @@ def test_pinned_hermes_loader_and_manager_lifecycle(tmp_path, monkeypatch, pinne
         agent_context="primary",
         agent_identity="disposable",
     )
-    assert provider.health()["l1"]["status"] == "healthy"
-    assert [schema["name"] for schema in manager.get_all_tool_schemas()] == [
-        "tiered_memory_search",
-        "tiered_memory_store",
-        "tiered_memory_delete",
-    ]
-
-    stored = json.loads(
-        manager.handle_tool_call("tiered_memory_store", {"content": "disposable local memory"})
-    )
-    found = json.loads(manager.handle_tool_call("tiered_memory_search", {"query": "local memory"}))
-    assert stored["id"]
-    assert found[0]["id"] == stored["id"]
-    assert "disposable local memory" in provider.prefetch("local memory", session_id="session-1")
-
-    manager.shutdown_all()
-    assert provider.health()["l1"]["status"] == "closed"
-    assert provider.health()["l2"]["status"] == "closed"
+    assert manager.providers == []
+    assert not provider.is_available()
+    assert manager.get_all_tool_schemas() == []
 
 
 def test_pinned_manager_disables_failed_provider_before_tool_exposure(
     tmp_path, monkeypatch, pinned_hermes
 ):
     from agent.memory_manager import MemoryManager, inject_memory_provider_tools
+
     from hermes_tiered_memory.adapters import sqlite_l1
     from hermes_tiered_memory.providers.composite import CompositeProvider
 
@@ -169,6 +157,7 @@ def test_pinned_manager_unregisters_provider_when_initialization_cleanup_fails(
 ):
     """Cleanup failures must not leave a failed provider's tools routable."""
     from agent.memory_manager import MemoryManager
+
     from hermes_tiered_memory.adapters import sqlite_l1
     from hermes_tiered_memory.outbox import store
     from hermes_tiered_memory.providers.composite import CompositeProvider
@@ -228,7 +217,7 @@ def test_plugin_and_runtime_fail_closed_without_partial_registration(
     assert len(collector.calls) == 1
 
     provider = CompositeProvider()
-    with pytest.raises(RuntimeError, match="local_adapters"):
+    with pytest.raises(RuntimeError, match="Tiered live adapters could not initialize"):
         provider.initialize(
             "session-1",
             hermes_home=str(tmp_path / "hermes"),

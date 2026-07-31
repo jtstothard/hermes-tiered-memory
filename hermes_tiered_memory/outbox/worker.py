@@ -18,7 +18,6 @@ from hermes_tiered_memory.outbox.store import (
     TerminalOutcome,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -69,13 +68,20 @@ class PromotionWorker:
         self._thread.start()
         logger.info(f"Promotion worker started (owner_id={self._owner_id})")
 
-    def stop(self) -> None:
-        """Stop the background worker thread."""
+    def stop(self, *, drain_timeout_seconds: float = 5.0) -> None:
+        """Stop the background worker thread within the supplied shutdown cap.
+
+        Pending work is durable in SQLite.  If the worker is blocked in an L2
+        request when the cap expires, leave its leased row intact for normal
+        lease recovery on the next process rather than closing the outbox from
+        underneath the still-running thread.
+        """
         if self._thread is None:
             return
-
         self._stop_event.set()
-        self._thread.join(timeout=5.0)
+        self._thread.join(timeout=drain_timeout_seconds)
+        if self._thread.is_alive():
+            raise RuntimeError("promotion worker did not stop before shutdown drain cap")
         self._thread = None
         logger.info("Promotion worker stopped")
 
