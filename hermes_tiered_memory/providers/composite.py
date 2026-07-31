@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import uuid
@@ -118,10 +119,30 @@ class CompositeProvider(MemoryProvider):
             return False
 
     def _disable(self) -> None:
-        """Make a failed instance inert because Hermes retains failed providers."""
+        """Unregister a failed provider from pinned Hermes' retained manager state."""
         self._disabled = True
         self._initialized = False
         self.close()
+        frame = inspect.currentframe()
+        try:
+            while frame is not None:
+                manager = frame.f_locals.get("self")
+                routes = getattr(manager, "_tool_to_provider", None)
+                providers = getattr(manager, "_providers", None)
+                if isinstance(routes, dict) and isinstance(providers, list) and self in providers:
+                    providers.remove(self)
+                    for tool_name, provider in tuple(routes.items()):
+                        if provider is self:
+                            del routes[tool_name]
+                    setattr(
+                        manager,
+                        "_has_external",
+                        any(provider.name != "builtin" for provider in providers),
+                    )
+                    break
+                frame = frame.f_back
+        finally:
+            del frame
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Initialize one local-adapter provider instance for Hermes."""

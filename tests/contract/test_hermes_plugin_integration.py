@@ -142,9 +142,13 @@ def test_pinned_manager_disables_failed_provider_before_tool_exposure(
         agent_identity="disposable",
     )
 
-    assert manager.providers == [provider]
+    assert manager.providers == []
     assert not provider.is_available()
     assert manager.get_all_tool_schemas() == []
+    assert not manager.has_tool("tiered_memory_store")
+    assert "No memory provider handles tool 'tiered_memory_store'" in manager.handle_tool_call(
+        "tiered_memory_store", {"content": "must not dispatch"}
+    )
 
     agent = type(
         "Agent",
