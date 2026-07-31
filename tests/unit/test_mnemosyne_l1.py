@@ -89,6 +89,11 @@ def test_shared_bank_ledger_is_fully_scoped_for_reads_tombstones_and_health(
         assert foreign.health()["record_count"] == 0
 
         assert owner.forget(record.source_id) is True
+        tombstone = owner.get(record.source_id)
+        assert tombstone is not None
+        assert tombstone.is_deleted is True
+        assert tombstone.revision == record.revision + 1
+        assert owner.get_revision(record.source_id) == tombstone.revision
         assert foreign.get(record.source_id) is None
         assert foreign.get_revision(record.source_id) is None
         assert foreign.forget(record.source_id) is False
@@ -115,16 +120,43 @@ def test_legacy_unscoped_ledger_rows_are_migrated_fail_closed(tmp_path, fake_mne
     )
     ledger.execute(
         "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("legacy", 2, "secret", "{}", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00", 1),
+        (
+            "legacy-deleted",
+            2,
+            "deleted secret",
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            1,
+        ),
+    )
+    ledger.execute(
+        "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-live",
+            1,
+            "live secret",
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+            0,
+        ),
     )
     ledger.commit()
     ledger.close()
 
     adapter = _adapter(tmp_path, "profile", "session", "channel")
+    foreign = _adapter(tmp_path, "foreign", "foreign-session", "foreign-channel")
     try:
-        assert adapter.get("legacy") is None
-        assert adapter.get_revision("legacy") is None
-        assert adapter.forget("legacy") is False
+        for source_id in ("legacy-deleted", "legacy-live"):
+            assert adapter.get(source_id) is None
+            assert adapter.get_revision(source_id) is None
+            assert adapter.forget(source_id) is False
+            assert foreign.get(source_id) is None
+            assert foreign.get_revision(source_id) is None
+            assert foreign.forget(source_id) is False
         assert adapter.health()["record_count"] == 0
+        assert foreign.health()["record_count"] == 0
     finally:
         adapter.close()
+        foreign.close()
