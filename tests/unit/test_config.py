@@ -84,7 +84,7 @@ def test_reject_whitespace_only_ca_file(tmp_path):
         ProtectedConfigLoader(path, signature_path).load()
 
 
-@pytest.mark.parametrize("ca_file", ["relative/ca.pem", "/tmp/ca\x00.pem"])
+@pytest.mark.parametrize("ca_file", ["", "relative/ca.pem", "/tmp/ca\x00.pem"])
 def test_reject_malformed_ca_file_path(tmp_path, ca_file):
     data = _config()
     data["hindsight"]["tls"]["ca_file"] = ca_file
