@@ -164,6 +164,52 @@ def test_pinned_manager_disables_failed_provider_before_tool_exposure(
     assert agent.tools == []
 
 
+def test_pinned_manager_unregisters_provider_when_initialization_cleanup_fails(
+    tmp_path, monkeypatch, pinned_hermes
+):
+    """Cleanup failures must not leave a failed provider's tools routable."""
+    from agent.memory_manager import MemoryManager
+    from hermes_tiered_memory.adapters import sqlite_l1
+    from hermes_tiered_memory.outbox import store
+    from hermes_tiered_memory.providers.composite import CompositeProvider
+
+    class ClosingFailsSQLiteL1Adapter:
+        def __init__(self, path):
+            self.path = path
+
+        def close(self):
+            raise OSError("L1 cleanup failed")
+
+    class FailingOutboxStore:
+        def __init__(self, path):
+            raise OSError(f"cannot open {path}")
+
+    monkeypatch.setattr(sqlite_l1, "SQLiteL1Adapter", ClosingFailsSQLiteL1Adapter)
+    monkeypatch.setattr(store, "OutboxStore", FailingOutboxStore)
+    provider = CompositeProvider()
+    manager = MemoryManager()
+    manager.add_provider(provider)
+
+    manager.initialize_all(
+        session_id="session-1",
+        hermes_home=str(tmp_path / "hermes"),
+        platform="cli",
+        agent_context="primary",
+        agent_identity="disposable",
+    )
+
+    assert provider not in manager.providers
+    for tool_name in (
+        "tiered_memory_store",
+        "tiered_memory_search",
+        "tiered_memory_delete",
+    ):
+        assert not manager.has_tool(tool_name)
+        assert f"No memory provider handles tool '{tool_name}'" in manager.handle_tool_call(
+            tool_name, {}
+        )
+
+
 def test_plugin_and_runtime_fail_closed_without_partial_registration(
     tmp_path, monkeypatch, pinned_hermes
 ):
