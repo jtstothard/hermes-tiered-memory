@@ -337,11 +337,43 @@ class ProtectedConfigLoader:
             raise ProtectedConfigValidationError("Unsupported or invalid tls fields")
         if not isinstance(tls.get("verify"), bool):
             raise ProtectedConfigValidationError(f"Invalid tls.verify: {tls.get('verify')}")
+        if not tls["verify"]:
+            raise ProtectedConfigValidationError("Invalid tls.verify: TLS verification must be enabled")
+
         ca_file = tls.get("ca_file")
-        if ca_file is not None and (not isinstance(ca_file, str) or not ca_file):
-            raise ProtectedConfigValidationError("Invalid tls.ca_file: expected non-empty string or null")
-        if ca_file is not None and not tls["verify"]:
-            raise ProtectedConfigValidationError("Invalid tls: ca_file requires verification")
+        if ca_file is not None:
+            if (
+                not isinstance(ca_file, str)
+                or not ca_file.strip()
+                or any(ord(character) < 32 or ord(character) == 127 for character in ca_file)
+            ):
+                raise ProtectedConfigValidationError("Invalid tls.ca_file: expected a canonical absolute path")
+
+            ca_path = pathlib.Path(ca_file)
+            if not ca_path.is_absolute():
+                raise ProtectedConfigValidationError("Invalid tls.ca_file: expected a canonical absolute path")
+            try:
+                canonical_ca_path = ca_path.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError) as e:
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected an existing readable file"
+                ) from e
+
+            if str(canonical_ca_path) != ca_file or not canonical_ca_path.is_file():
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected a canonical absolute regular file"
+                )
+            if not stat.S_IMODE(canonical_ca_path.stat().st_mode) & 0o444:
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected an existing readable file"
+                )
+            try:
+                with canonical_ca_path.open("rb"):
+                    pass
+            except OSError as e:
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected an existing readable file"
+                ) from e
 
         # Validate proxy config
         proxy = hindsight["proxy"]
