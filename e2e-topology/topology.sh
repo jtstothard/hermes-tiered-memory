@@ -11,7 +11,9 @@ HERMES_SRC="${HERMES_SRC:-/hermes}"
 MNEMOSYNE_SRC="${MNEMOSYNE_SRC:-/tmp/mnemosyne-v314}"
 HINDSIGHT_SRC="${HINDSIGHT_SRC:-/hindsight}"
 VENV="$ROOT/venv"
-COMPOSE_PROJECT="hermes-tiered-e2e-$(id -u)"
+# Include the disposable root in the container name so a prior cleanup cannot
+# collide with a concurrent/just-finished disposable run.
+COMPOSE_PROJECT="hermes-tiered-e2e-$(id -u)-$(printf %s "$ROOT" | cksum | cut -d ' ' -f 1)"
 CONTAINER="${COMPOSE_PROJECT}-hindsight"
 
 fail() { printf 'topology: %s\n' "$*" >&2; exit 1; }
@@ -58,7 +60,8 @@ YAML
   chmod 600 "$ROOT/hermes/config.yaml"
 
   python3 -m venv "$VENV"
-  "$VENV/bin/pip" install --quiet -e "$ROOT/sources/mnemosyne"
+  "$VENV/bin/pip" install --quiet -e "$ROOT/sources/mnemosyne" \
+    'cryptography>=41.0.0' 'httpx>=0.25.0'
   "$VENV/bin/python" - <<PY
 import os, sqlite3
 os.environ['MNEMOSYNE_DATA_DIR'] = '$ROOT/mnemosyne'
@@ -112,9 +115,20 @@ PY
   printf 'SMOKE_PASS hermes=healthy mnemosyne=healthy hindsight=healthy\n'
 }
 
+adapter_test() {
+  [[ -f "$STATE/READY" ]] || fail 'topology is not started'
+  TOPOLOGY_ROOT="$ROOT" PYTHONPATH="$REPO_ROOT" \
+    "$VENV/bin/python" "$REPO_ROOT/e2e-topology/live_mnemosyne_l1_test.py" \
+    > "$STATE/live-mnemosyne-l1.txt"
+  grep -F 'ADAPTER_PASS records=3 profiles=2' "$STATE/live-mnemosyne-l1.txt" >/dev/null || \
+    fail 'live Mnemosyne L1 adapter probe failed'
+  printf 'ADAPTER_PASS mnemosyne=l1\n'
+}
+
 teardown() {
   if [[ -f "$STATE/container-id" ]]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; fi
-  [[ "$ROOT" == /tmp/hermes-tiered-memory-e2e* ]] || fail 'unsafe topology root; refusing deletion'
+  [[ "$ROOT" == /tmp/hermes-tiered-memory-e2e* || "$ROOT" == /tmp/tiered-memory-adapter-* ]] || \
+    fail 'unsafe topology root; refusing deletion'
   rm -rf -- "$ROOT"
   printf 'TOPOLOGY_TORN_DOWN root=%s\n' "$ROOT"
 }
@@ -124,6 +138,7 @@ test_twice() {
     printf 'E2E_RUN %s/2\n' "$run"
     start
     smoke
+    adapter_test
     teardown
     [[ ! -e "$ROOT" ]] || fail "temporary root leaked after run $run: $ROOT"
   done
@@ -133,7 +148,8 @@ test_twice() {
 case "${1:-}" in
   start) start ;;
   smoke) smoke ;;
+  adapter-test) adapter_test ;;
   teardown) teardown ;;
   test) test_twice ;;
-  *) echo "usage: $0 {start|smoke|teardown|test}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start|smoke|adapter-test|teardown|test}" >&2; exit 2 ;;
 esac
