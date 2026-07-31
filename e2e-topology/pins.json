@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "components": {
+    "hermes": {"tag": "v2026.7.20", "commit": "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"},
+    "mnemosyne": {"tag": "v3.14.0", "commit": "4e5ed14ab2b9befbc4b77f1f5b43d06de8c18bce"},
+    "hindsight": {"tag": "v0.8.6", "commit": "08995e3013858e705fb4ca27c0ade3a286ef4750"}
+  }
+}
