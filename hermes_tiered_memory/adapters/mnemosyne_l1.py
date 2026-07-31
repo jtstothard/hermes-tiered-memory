@@ -198,7 +198,9 @@ class MnemosyneL1Adapter(L1Adapter):
             try:
                 self._memory.conn.execute("SELECT 1").fetchone()
                 count = self._ledger.execute(
-                    "SELECT COUNT(*) FROM records WHERE is_deleted = 0"
+                    "SELECT COUNT(*) FROM records "
+                    "WHERE profile = ? AND session_id = ? AND channel_id = ? AND is_deleted = 0",
+                    (self.profile, self.session_id, self.channel_id),
                 ).fetchone()[0]
                 return {
                     "status": "healthy",
@@ -291,15 +293,51 @@ class MnemosyneL1Adapter(L1Adapter):
         with self._ledger:
             self._ledger.execute(
                 """CREATE TABLE IF NOT EXISTS records (
-                    source_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
                     revision INTEGER NOT NULL,
                     content TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1))
+                    is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
+                    PRIMARY KEY (source_id, profile, session_id, channel_id)
                 )"""
             )
+            columns = {
+                row["name"]
+                for row in self._ledger.execute("PRAGMA table_info(records)").fetchall()
+            }
+            if not {"profile", "session_id", "channel_id"}.issubset(columns):
+                # A legacy ledger keyed by source_id alone cannot safely share a
+                # bank: the primary key also prevents distinct scopes reusing an
+                # upstream source ID. Migrate its rows into an unaddressable
+                # empty scope so legacy data remains preserved but fail-closed.
+                self._ledger.execute("ALTER TABLE records RENAME TO records_legacy")
+                self._ledger.execute(
+                    """CREATE TABLE records (
+                        source_id TEXT NOT NULL,
+                        profile TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        channel_id TEXT NOT NULL,
+                        revision INTEGER NOT NULL,
+                        content TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
+                        PRIMARY KEY (source_id, profile, session_id, channel_id)
+                    )"""
+                )
+                self._ledger.execute(
+                    """INSERT INTO records
+                    (source_id, profile, session_id, channel_id, revision, content, metadata_json, created_at, updated_at, is_deleted)
+                    SELECT source_id, '', '', '', revision, content, metadata_json, created_at, updated_at, is_deleted
+                    FROM records_legacy"""
+                )
+                self._ledger.execute("DROP TABLE records_legacy")
 
     def _insert_ledger(self, record: L1Record, *, commit: bool = True) -> None:
         if self._ledger_row(record.source_id) is not None:
@@ -309,11 +347,14 @@ class MnemosyneL1Adapter(L1Adapter):
     def _replace_ledger(self, record: L1Record, *, commit: bool = True) -> None:
         statement = (
             "INSERT OR REPLACE INTO records "
-            "(source_id, revision, content, metadata_json, created_at, updated_at, is_deleted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "(source_id, profile, session_id, channel_id, revision, content, metadata_json, created_at, updated_at, is_deleted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         values = (
             record.source_id,
+            self.profile,
+            self.session_id,
+            self.channel_id,
             record.revision,
             record.content,
             json.dumps(record.metadata, separators=(",", ":")),
@@ -330,7 +371,11 @@ class MnemosyneL1Adapter(L1Adapter):
     def _ledger_row(self, source_id: str) -> sqlite3.Row | None:
         if not isinstance(source_id, str) or not source_id:
             return None
-        return self._ledger.execute("SELECT * FROM records WHERE source_id = ?", (source_id,)).fetchone()
+        return self._ledger.execute(
+            "SELECT * FROM records "
+            "WHERE source_id = ? AND profile = ? AND session_id = ? AND channel_id = ?",
+            (source_id, self.profile, self.session_id, self.channel_id),
+        ).fetchone()
 
     @staticmethod
     def _record_from_ledger(row: sqlite3.Row) -> L1Record:
