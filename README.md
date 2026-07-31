@@ -100,8 +100,18 @@ Store the signature in a separate file (or secret-store object).
 
 ### Hermes Configuration
 
-If and when the pinned Hermes provider boundary is implemented and verified,
-the intended configuration shape would be:
+The pinned Hermes `MemoryManager.initialize_all()` forwards runtime scope but
+does not forward the loaded configuration mapping to `MemoryProvider.initialize()`.
+The supported provider-config seam is therefore the effective, profile-scoped
+`hermes_cli.config.load_config_readonly()` loader, which Hermes memory plugins
+use for their own `memory.<provider>` settings. The composite reads
+`memory.tiered` through that loader during `initialize()`, promotes it to its
+internal `tiered` runtime block, and retains the full effective config only to
+resolve the active profile's Hindsight credential. It does not use an
+environment-variable bridge, constructor injection, or a bypass of the
+`MemoryManager` lifecycle.
+
+Configure it as:
 
 ```yaml
 memory:
