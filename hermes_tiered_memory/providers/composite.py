@@ -14,6 +14,38 @@ from hermes_tiered_memory.config import ProtectedConfig, ProtectedConfigLoader
 
 logger = logging.getLogger(__name__)
 
+
+def _load_tiered_runtime_config() -> dict[str, Any] | None:
+    """Read the active Hermes config through the provider-supported config seam.
+
+    The pinned ``MemoryManager`` forwards runtime scope to ``initialize()``,
+    but not the loaded configuration mapping. Memory-provider plugins own
+    their config lookup (for example, pinned ByteRover and OpenViking providers
+    read ``memory.<provider>`` with ``load_config_readonly()``). Keep the full
+    effective mapping because this provider also needs the active profile's
+    Hindsight credential, while promoting ``memory.tiered`` to the provider's
+    internal ``tiered`` key.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly()
+    except Exception:
+        logger.warning("Could not load Hermes configuration for tiered memory", exc_info=True)
+        return None
+    if not isinstance(config, dict):
+        return None
+    memory = config.get("memory")
+    if not isinstance(memory, dict):
+        return None
+    tiered = memory.get("tiered")
+    if not isinstance(tiered, dict):
+        return None
+    runtime_config = dict(config)
+    runtime_config["tiered"] = dict(tiered)
+    return runtime_config
+
+
 try:
     # The real plugin process imports Hermes' pinned public ABC.  The fallback
     # only lets this library's standalone tests run without Hermes installed.
@@ -169,12 +201,16 @@ class CompositeProvider(MemoryProvider):
             raise RuntimeError("Hermes session_id is required; composite provider startup aborted")
 
         config = kwargs.get("config")
+        if config is None:
+            config = _load_tiered_runtime_config()
         if config is None and self.session is not None:
             config = getattr(self.session, "config", None)
         # Pinned Hermes does not pass its loaded config through MemoryManager.
-        # A config-less invocation remains a valid lifecycle call, but it must
-        # fail closed before any adapter/network side effect rather than choose
-        # the old SQLite/mock topology.
+        # Its supported memory-provider configuration seam is the
+        # profile-scoped, effective config loader. A config-less invocation
+        # remains a valid lifecycle call, but it must fail closed before any
+        # adapter/network side effect rather than choose the old SQLite/mock
+        # topology.
         if config is None:
             self._disable()
             raise RuntimeError("Tiered provider requires live tiered configuration")
@@ -380,7 +416,10 @@ class CompositeProvider(MemoryProvider):
         from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
 
         self.l2_adapter = HindsightL2Adapter(
-            self.protected_config.hindsight.to_url(), api_key=api_key
+            self.protected_config.hindsight.to_url(),
+            api_key=api_key,
+            verify_tls=self.protected_config.hindsight.verify_tls,
+            ca_file=self.protected_config.hindsight.ca_file,
         )
         logger.info("L2 Hindsight adapter initialized")
 

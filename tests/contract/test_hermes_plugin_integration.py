@@ -46,7 +46,10 @@ def pinned_hermes(tmp_path_factory, monkeypatch):
         is_tiered_module = name == "hermes_tiered_memory" or name.startswith(
             "hermes_tiered_memory."
         )
-        if is_agent_module or is_tiered_module:
+        is_tiered_plugin_module = name == "_hermes_user_memory.tiered-memory" or name.startswith(
+            "_hermes_user_memory.tiered-memory."
+        )
+        if is_agent_module or is_tiered_module or is_tiered_plugin_module:
             monkeypatch.delitem(sys.modules, name, raising=False)
     agent = _load_pinned_module(source, "agent", "agent/__init__.py")
     agent.__path__ = [str(source / "agent")]
@@ -102,6 +105,60 @@ def test_pinned_hermes_loader_fails_closed_without_runtime_config(
     assert manager.providers == []
     assert not provider.is_available()
     assert manager.get_all_tool_schemas() == []
+
+
+def test_pinned_manager_loads_tiered_config_through_provider_config_seam(
+    tmp_path, monkeypatch, pinned_hermes
+):
+    """The real manager lifecycle reaches the canonical provider config loader."""
+    from agent.memory_manager import MemoryManager
+    from plugins.memory import load_memory_provider
+
+    from hermes_tiered_memory import __file__ as package_init
+
+    hermes_home = tmp_path / "hermes"
+    plugin_dir = hermes_home / "plugins" / "tiered-memory"
+    shutil.copytree(Path(package_init).parent, plugin_dir)
+    (hermes_home / "config.yaml").write_text(
+        """\
+memory:
+  provider: tiered-memory
+  tiered:
+    bank_mapping:
+      disposable: disposable-bank
+profiles:
+  disposable:
+    secrets:
+      hindsight:
+        api_key: disposable-test-key
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    provider = load_memory_provider("tiered-memory")
+    assert provider is not None
+    captured = []
+    monkeypatch.setattr(provider, "initialize_all", lambda: captured.append(provider._runtime_config))
+
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    manager.initialize_all(
+        session_id="session-1",
+        hermes_home=str(hermes_home),
+        platform="cli",
+        agent_context="primary",
+        agent_identity="disposable",
+    )
+
+    assert len(captured) == 1
+    runtime_config = captured[0]
+    assert runtime_config["tiered"] == {"bank_mapping": {"disposable": "disposable-bank"}}
+    assert runtime_config["memory"]["tiered"] == runtime_config["tiered"]
+    assert runtime_config["profiles"]["disposable"]["secrets"]["hindsight"] == {
+        "api_key": "disposable-test-key"
+    }
+    assert provider.is_available()
 
 
 def test_pinned_manager_disables_failed_provider_before_tool_exposure(

@@ -1,4 +1,4 @@
-"""Safety and cleanup behavior for the disposable topology script."""
+"""Safety and cleanup behavior for the disposable HTTPS topology script."""
 
 from __future__ import annotations
 
@@ -13,22 +13,35 @@ SCRIPT = REPO_ROOT / "e2e-topology" / "topology.sh"
 
 
 def _run_teardown(root: Path) -> subprocess.CompletedProcess[str]:
-    environment = os.environ | {"TOPOLOGY_ROOT": str(root)}
     return subprocess.run(
         [str(SCRIPT), "teardown"],
         cwd=REPO_ROOT,
-        env=environment,
+        env=os.environ | {"TOPOLOGY_ROOT": str(root)},
         check=False,
         capture_output=True,
         text=True,
     )
 
 
-def test_teardown_removes_any_disposable_hermes_tiered_memory_root(tmp_path: Path) -> None:
+def test_teardown_removes_any_disposable_hermes_tiered_memory_root() -> None:
     root = Path("/tmp") / f"hermes-tiered-memory-acceptance-{uuid.uuid4().hex}"
     root.mkdir()
     (root / "state").mkdir()
     (root / "synthetic-state").write_text("safe to delete")
+
+    result = _run_teardown(root)
+
+    assert result.returncode == 0, result.stderr
+    assert not root.exists()
+    assert "TOPOLOGY_TORN_DOWN" in result.stdout
+
+
+def test_teardown_removes_disposable_https_ca_and_server_material() -> None:
+    root = Path("/tmp") / f"hermes-tiered-memory-https-{uuid.uuid4().hex}"
+    tls_dir = root / "tls"
+    tls_dir.mkdir(parents=True)
+    for filename in ("ca.crt", "ca.key", "hindsight.crt", "hindsight.key"):
+        (tls_dir / filename).write_text("disposable only")
 
     result = _run_teardown(root)
 

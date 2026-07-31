@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 from datetime import datetime
 
 import httpx
@@ -94,6 +95,34 @@ def test_retain_batch_reports_per_item_failures():
     assert results[1].error == "L2 metadata must contain a non-empty string bank"
     assert results[2].error is not None
     assert "422" in results[2].error
+
+
+def test_owned_client_uses_configured_tls_verification(monkeypatch):
+    created: dict[str, object] = {}
+    tls_context = object()
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(httpx, "Client", CapturingClient)
+    monkeypatch.setattr(ssl, "create_default_context", lambda *, cafile: tls_context)
+
+    adapter = HindsightL2Adapter(
+        "https://hindsight.test", api_key="key", ca_file="/disposable/ca.crt"
+    )
+
+    assert adapter._tls_verify is tls_context
+    assert created["verify"] is tls_context
+    assert created["headers"] == {"Authorization": "Bearer key"}
+
+
+def test_ca_file_cannot_disable_tls_verification():
+    with pytest.raises(ValueError, match="ca_file requires TLS verification"):
+        HindsightL2Adapter("https://hindsight.test", verify_tls=False, ca_file="/ca.crt")
 
 
 def test_recall_restores_composite_envelope_and_deduplicates_documents():
