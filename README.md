@@ -1,10 +1,10 @@
-# Hermes Tiered Memory — Composite Provider Prototype
+# Hermes Tiered Memory — Composite Provider
 
-A fail-closed composite-provider prototype for a future Hermes integration. It is not a production Hermes memory provider and does not claim live Mnemosyne or Hindsight compatibility.
+A fail-closed Hermes `MemoryProvider` integration using disposable local adapters. It does not claim live Mnemosyne or Hindsight compatibility.
 
 ## Scope and Status
 
-This package contains the current composite-provider prototype, deterministic unit/contract tests, and developer documentation. It does not yet provide a usable pinned-Hermes `MemoryProvider` implementation or live adapter integration.
+This package contains a usable pinned-Hermes `MemoryProvider` implementation backed by disposable SQLite L1 and mock L2 adapters, deterministic unit/contract tests, and developer documentation. It does not provide live adapter integration.
 
 **What is included:**
 - Composite-provider prototype with deterministic mock-adapter tests
@@ -14,7 +14,6 @@ This package contains the current composite-provider prototype, deterministic un
 - No bundled dependencies or Hermes core changes
 
 **What is explicitly NOT included:**
-- A usable Hermes `MemoryProvider` implementation or live registration
 - Live Mnemosyne/Hindsight adapter routes or compatibility evidence
 - Outbox crash replay: abandoned `in_flight` rows are not reclaimed (design in research/outbox-crash-recovery-contract.md)
 - Live integration tests with pinned Hermes/Mnemosyne/Hindsight services
@@ -26,19 +25,19 @@ This package contains the current composite-provider prototype, deterministic un
 
 ```
 Hermes
-  └── CompositeProvider (future Hermes-facing boundary; not currently loadable)
-        ├── Mnemosyne L1 adapter (synchronous reads/writes)
-        ├── Hindsight L2 adapter (reads + retain/batch-retain)
-        └── Promotion behavior (prototype only; no durability claim)
+  └── CompositeProvider (loadable pinned-Hermes provider boundary)
+        ├── SQLite L1 adapter (synchronous reads/writes; disposable)
+        ├── Mock L2 adapter (reads + retain/batch-retain; disposable)
+        └── Promotion behavior (prototype only; no live-service durability claim)
 ```
 
-The composite is designed to own the sole Hermes-facing memory tool namespace (`memory_search`, `memory_store`) once live integration is implemented. Mnemosyne and Hindsight adapters expose no duplicate Hermes tools.
+The composite owns the sole Hermes-facing memory tool namespace (`tiered_memory_search`, `tiered_memory_store`, and `tiered_memory_delete`). Mnemosyne and Hindsight adapters expose no duplicate Hermes tools.
 
-## Future integration shape (not currently executable)
+## Current and future integration
 
-The following describes the intended future integration shape only. The current
-package deliberately fails closed because `CompositeProvider` does not yet
-implement the pinned Hermes `MemoryProvider` ABC.
+The checked-in provider implements the pinned Hermes `MemoryProvider` ABC and is loadable through the plugin loader. Its current runtime path uses disposable SQLite L1 and mock L2 adapters. It fails closed: if adapter initialization fails, the retained provider instance disables its schemas so Hermes cannot expose its tools.
+
+The following describes the future live-service integration shape only.
 
 ### Prerequisites
 
@@ -227,10 +226,12 @@ This implementation follows the contracts defined in:
 
 ## Safety Boundary
 
-The package fails closed rather than registering the current prototype as a
-Hermes provider. Protected configuration is required at startup and must be
-valid, signed, and fresh. The prototype's adapter/outbox behavior is not a
-claim of live Hermes or service compatibility.
+The package is a loadable pinned-Hermes provider using disposable local adapters. It
+fails closed after startup validation or adapter initialization fails: the retained
+provider is disabled and removed from Hermes' provider and tool-routing state, so
+Hermes cannot expose or dispatch its tools. Protected configuration, when supplied,
+must be valid, signed, and fresh. The prototype's adapter/outbox behavior is not a
+claim of live Hermes service compatibility.
 
 ## Limitations
 
