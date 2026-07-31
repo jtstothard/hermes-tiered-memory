@@ -226,10 +226,12 @@ This implementation follows the contracts defined in:
 
 ## Safety Boundary
 
-The package fails closed rather than registering the current prototype as a
-Hermes provider. Protected configuration is required at startup and must be
-valid, signed, and fresh. The prototype's adapter/outbox behavior is not a
-claim of live Hermes or service compatibility.
+The package is a loadable pinned-Hermes provider using disposable local adapters. It
+fails closed after startup validation or adapter initialization fails: the retained
+provider is disabled and removed from Hermes' provider and tool-routing state, so
+Hermes cannot expose or dispatch its tools. Protected configuration, when supplied,
+must be valid, signed, and fresh. The prototype's adapter/outbox behavior is not a
+claim of live Hermes service compatibility.
 
 ## Limitations
 
