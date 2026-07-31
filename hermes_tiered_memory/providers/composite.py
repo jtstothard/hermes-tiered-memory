@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import uuid
+from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,8 +16,31 @@ from hermes_tiered_memory.config import ProtectedConfig, ProtectedConfigLoader
 
 logger = logging.getLogger(__name__)
 
+try:
+    # The real plugin process imports Hermes' pinned public ABC.  The fallback
+    # only lets this library's standalone tests run without Hermes installed.
+    from agent.memory_provider import MemoryProvider
+except ModuleNotFoundError:  # pragma: no cover - standalone test environment
+    class MemoryProvider(ABC):
+        @property
+        @abstractmethod
+        def name(self) -> str:
+            """Provider identifier."""
 
-class CompositeProvider:
+        @abstractmethod
+        def is_available(self) -> bool:
+            """Whether the provider can be activated."""
+
+        @abstractmethod
+        def initialize(self, session_id: str, **kwargs: Any) -> None:
+            """Initialize provider state."""
+
+        @abstractmethod
+        def get_tool_schemas(self) -> list[dict[str, Any]]:
+            """Return provider tool schemas."""
+
+
+class CompositeProvider(MemoryProvider):
     """
     Composite Hermes memory provider combining Mnemosyne L1 and Hindsight L2.
 
@@ -31,19 +56,19 @@ class CompositeProvider:
 
     def __init__(
         self,
-        session,
-        platform,
-        hermes_home: str,
-        context,
-        user_identity: str,
-        chat_identity: str,
-        thread_identity: str,
-        active_profile_identity: str,
-    ):
-        """Initialize the composite provider."""
+        session: Any = None,
+        platform: str = "",
+        hermes_home: str = "",
+        context: Any = None,
+        user_identity: str = "",
+        chat_identity: str = "",
+        thread_identity: str = "",
+        active_profile_identity: str = "",
+    ) -> None:
+        """Initialize an inert instance; Hermes supplies runtime scope later."""
         self.session = session
         self.platform = platform
-        self.hermes_home = Path(hermes_home)
+        self.hermes_home = Path(hermes_home) if hermes_home else Path()
         self.context = context
         self.user_identity = user_identity
         self.chat_identity = chat_identity
@@ -65,11 +90,224 @@ class CompositeProvider:
 
         # Protected configuration
         self.protected_config: ProtectedConfig | None = None
+        self.session_id = ""
+        self.agent_context = ""
+        self._prefetched: dict[str, list[dict[str, Any]]] = {}
+        self._initialized = False
+        self._disabled = False
 
         logger.info(
             f"CompositeProvider initialized for profile={active_profile_identity}, "
             f"user={user_identity}, chat={chat_identity}, thread={thread_identity}"
         )
+
+    @property
+    def name(self) -> str:
+        """The single external provider identifier visible to Hermes."""
+        return "tiered-memory"
+
+    def is_available(self) -> bool:
+        """Return whether this instance can expose its local provider tools."""
+        if self._disabled:
+            return False
+        try:
+            from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
+            from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+
+            return bool(MockL2Adapter and SQLiteL1Adapter)
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+    def _disable(self) -> None:
+        """Unregister a failed provider before best-effort resource cleanup."""
+        self._disabled = True
+        self._initialized = False
+        frame = inspect.currentframe()
+        try:
+            while frame is not None:
+                manager = frame.f_locals.get("self")
+                routes = getattr(manager, "_tool_to_provider", None)
+                providers = getattr(manager, "_providers", None)
+                if isinstance(routes, dict) and isinstance(providers, list) and self in providers:
+                    providers.remove(self)
+                    for tool_name, provider in tuple(routes.items()):
+                        if provider is self:
+                            del routes[tool_name]
+                    setattr(
+                        manager,
+                        "_has_external",
+                        any(provider.name != "builtin" for provider in providers),
+                    )
+                    break
+                frame = frame.f_back
+        finally:
+            del frame
+        try:
+            self.close()
+        except Exception:
+            logger.exception("Failed to clean up disabled tiered memory provider")
+
+    def initialize(self, session_id: str, **kwargs: Any) -> None:
+        """Initialize one local-adapter provider instance for Hermes."""
+        if self._disabled:
+            raise RuntimeError("Tiered provider is disabled after a previous initialization failure")
+        hermes_home = kwargs.get("hermes_home")
+        profile = kwargs.get("agent_identity")
+        if not isinstance(hermes_home, str) or not hermes_home:
+            self._disable()
+            raise RuntimeError("Hermes hermes_home is required; composite provider startup aborted")
+        if not isinstance(profile, str) or not profile:
+            self._disable()
+            raise RuntimeError("Hermes agent_identity is required; composite provider startup aborted")
+        if not isinstance(session_id, str) or not session_id:
+            self._disable()
+            raise RuntimeError("Hermes session_id is required; composite provider startup aborted")
+
+        config = kwargs.get("config")
+        if config is None and self.session is not None:
+            config = getattr(self.session, "config", None)
+        if config is not None and not isinstance(config, dict):
+            self._disable()
+            raise RuntimeError("Tiered provider configuration must be a mapping; startup aborted")
+        tiered = (config or {}).get("tiered", {})
+        if config is not None and (not isinstance(tiered, dict) or tiered.get("local_adapters") is not True):
+            self._disable()
+            raise RuntimeError(
+                "tiered.local_adapters: true is required when tiered provider configuration is supplied"
+            )
+
+        self.session_id = session_id
+        self.platform = str(kwargs.get("platform", self.platform or "cli"))
+        self.hermes_home = Path(hermes_home)
+        self.context = kwargs.get("agent_context", self.context)
+        self.agent_context = str(kwargs.get("agent_context", ""))
+        self.user_identity = str(kwargs.get("user_id", self.user_identity))
+        self.chat_identity = str(kwargs.get("chat_id", self.chat_identity))
+        self.thread_identity = str(kwargs.get("thread_id", self.thread_identity))
+        self.active_profile_identity = profile
+
+        from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
+        from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+        from hermes_tiered_memory.outbox.store import OutboxStore
+
+        data_dir = self.hermes_home / "profiles" / profile / "tiered-memory"
+        l1 = outbox = None
+        try:
+            l1 = SQLiteL1Adapter(data_dir / "l1.db")
+            outbox = OutboxStore(data_dir / "outbox.db")
+            l2 = MockL2Adapter()
+        except Exception as exc:
+            try:
+                if l1 is not None:
+                    l1.close()
+                if outbox is not None:
+                    outbox.close()
+            except Exception:
+                logger.exception("Failed to clean up partially initialized tiered adapters")
+            self._disable()
+            raise RuntimeError("Tiered local adapters could not initialize; startup aborted") from exc
+
+        self.l1_adapter = l1
+        self.l2_adapter = l2
+        self.outbox_store = outbox
+        self._initialized = True
+
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
+        """Expose one non-reserved namespace through the Hermes manager."""
+        if self._disabled:
+            return []
+        return [
+            {
+                "name": "tiered_memory_search",
+                "description": "Search the local tiered memory cache.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "tiered_memory_store",
+                "description": "Store a memory in the local tiered cache.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}, "metadata": {"type": "object"}},
+                    "required": ["content"],
+                },
+            },
+            {
+                "name": "tiered_memory_delete",
+                "description": "Delete a memory from the local tiered cache.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"memory_id": {"type": "string"}},
+                    "required": ["memory_id"],
+                },
+            },
+        ]
+
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
+        """Dispatch only advertised tools and always return JSON."""
+        del kwargs
+        if not isinstance(args, dict):
+            raise ValueError("memory tool arguments must be an object")
+        if tool_name == "tiered_memory_search":
+            query, limit = args.get("query"), args.get("limit", 10)
+            if not isinstance(query, str) or not query or isinstance(limit, bool) or not isinstance(limit, int):
+                raise ValueError("tiered_memory_search requires string query and integer limit")
+            return json.dumps(self.memory_search(query, limit=max(1, min(limit, 100))), sort_keys=True)
+        if tool_name == "tiered_memory_store":
+            content, metadata = args.get("content"), args.get("metadata", {})
+            if not isinstance(content, str) or not content or not isinstance(metadata, dict):
+                raise ValueError("tiered_memory_store requires string content and object metadata")
+            return json.dumps(self.memory_store(content, metadata), sort_keys=True)
+        if tool_name == "tiered_memory_delete":
+            memory_id = args.get("memory_id")
+            if not isinstance(memory_id, str) or not memory_id:
+                raise ValueError("tiered_memory_delete requires string memory_id")
+            return json.dumps({"deleted": self.memory_delete(memory_id)}, sort_keys=True)
+        raise ValueError(f"Unknown tiered memory tool: {tool_name}")
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Return cached recall if present, otherwise perform bounded local recall."""
+        key = session_id or self.session_id
+        results = self._prefetched.pop(key, None)
+        if results is None and query:
+            results = self.memory_search(query, limit=5)
+        if not results:
+            return ""
+        return "Tiered memory recall:\n" + "\n".join(f"- {item['content']}" for item in results)
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Populate a local cache synchronously; no network thread is needed here."""
+        if query:
+            self._prefetched[session_id or self.session_id] = self.memory_search(query, limit=5)
+
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        messages: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Honor the turn hook without retaining complete transcripts yet."""
+        del user_content, assistant_content, messages
+        if session_id and session_id != self.session_id:
+            self.on_session_switch(session_id)
+
+    def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
+        """Invalidate session-local prefetch state when Hermes rotates sessions."""
+        del kwargs
+        self.session_id = new_session_id
+        self._prefetched.clear()
+
+    def shutdown(self) -> None:
+        """Hermes lifecycle shutdown hook."""
+        self.close()
 
     def initialize_all(self) -> None:
         """Initialize all adapters and the promotion worker."""
