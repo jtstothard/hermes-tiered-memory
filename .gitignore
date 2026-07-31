@@ -8,4 +8,6 @@ __pycache__/
 *.sqlite
 *.db
 *.log
+.coverage
+htmlcov/
 .DS_Store
