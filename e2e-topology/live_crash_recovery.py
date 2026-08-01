@@ -151,55 +151,72 @@ manager.initialize_all(
 action = {json.dumps(action)}
 
 if action == "store":
+    # Stop the promotion worker so it cannot promote the row before SIGKILL.
+    # We need an in_flight row with an expired lease to survive the crash so
+    # recover_in_flight() has something to recover on restart.
+    provider.promotion_worker.stop()
     stored = json.loads(manager.handle_tool_call(
         "tiered_memory_store",
         {{"content": {token_json} + ": durable SIGKILL test", "metadata": {{"scenario": "crash-recovery", "tag": "sigkill"}}}},
     ))
     sid = stored["id"]
     print(f"CRASH_STORE source_id={{sid}}")
-    for _ in range(120):
-        stats = provider.outbox_store.get_stats()
-        if stats.get("in_flight", 0) >= 1:
-            break
-        time.sleep(0.25)
-    print(f"CRASH_ENQUEUED in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    # Manually claim the pending row so it is in_flight with a short lease.
+    items = provider.outbox_store.claim_batch(
+        batch_size=1, owner_id="crash-test-owner",
+        lease_id="crash-test-lease", lease_duration_seconds=2,
+    )
+    print(f"CRASH_ENQUEUED claimed={{len(items)}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    # Wait for the 2s lease to expire so recover_in_flight can recover it.
+    time.sleep(3)
     (root / "crash_pid").write_text(str(os.getpid()))
-    # Stay alive so the parent can SIGKILL us while the promotion worker runs.
+    # Stay alive so the parent can SIGKILL us while the expired in_flight row sits.
     time.sleep(30)
 
 elif action == "drain":
+    print(f"CRASH_RECOVERY_COUNT recovered={{provider.last_recovery_count}}")
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         stats = provider.outbox_store.get_stats()
-        if stats.get("pending", 0) == 0 and stats.get("promoted", 0) >= 1:
+        if stats.get("pending", 0) == 0 and stats.get("in_flight", 0) == 0 and stats.get("promoted", 0) >= 1:
             break
         time.sleep(0.25)
     stats = provider.outbox_store.get_stats()
     print(f"CRASH_DRAIN pending={{stats['pending']}} promoted={{stats['promoted']}} in_flight={{stats['in_flight']}}")
-    recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
     expected_doc_id = provider._generate_document_id({src_id_json})
-    matching = [r for r in recalled if r.document_id == expected_doc_id]
+    matching = []
+    for _ in range(60):
+        recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
+        matching = [r for r in recalled if r.document_id == expected_doc_id]
+        if matching:
+            break
+        time.sleep(0.5)
     print(f"CRASH_L2_RECALL count={{len(matching)}}")
     provider.close()
 
 elif action == "delete":
+    # Stop the promotion worker so it cannot promote the delete before SIGKILL.
+    provider.promotion_worker.stop()
     result = json.loads(manager.handle_tool_call("tiered_memory_delete", {{"memory_id": {src_id_json}}}))
     print(f"CRASH_DELETE deleted={{result['deleted']}}")
-    for _ in range(120):
-        stats = provider.outbox_store.get_stats()
-        if stats.get("in_flight", 0) >= 1:
-            break
-        time.sleep(0.25)
-    print(f"CRASH_DELETE_ENQUEUED in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    # Manually claim the pending delete row so it is in_flight with a short lease.
+    items = provider.outbox_store.claim_batch(
+        batch_size=1, owner_id="crash-test-owner",
+        lease_id="crash-test-lease", lease_duration_seconds=2,
+    )
+    print(f"CRASH_DELETE_ENQUEUED claimed={{len(items)}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    # Wait for the 2s lease to expire so recover_in_flight can recover it.
+    time.sleep(3)
     (root / "crash_pid").write_text(str(os.getpid()))
-    # Stay alive so the parent can SIGKILL us while the delete promotion runs.
+    # Stay alive so the parent can SIGKILL us while the expired in_flight row sits.
     time.sleep(30)
 
 elif action == "verify-delete":
+    print(f"CRASH_RECOVERY_COUNT recovered={{provider.last_recovery_count}}")
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         stats = provider.outbox_store.get_stats()
-        if stats.get("pending", 0) == 0 and stats.get("promoted", 0) >= 1:
+        if stats.get("pending", 0) == 0 and stats.get("in_flight", 0) == 0 and stats.get("promoted", 0) >= 1:
             break
         time.sleep(0.25)
     stats = provider.outbox_store.get_stats()
@@ -278,7 +295,10 @@ def main() -> None:
     drain_promoted = 0
     in_flight = 0
     l2_recall = 0
+    recovery_count_2 = 0
     for line in lines2:
+        if line.startswith("CRASH_RECOVERY_COUNT"):
+            recovery_count_2 = int(line.split("recovered=")[1].strip())
         if line.startswith("CRASH_DRAIN"):
             parts = line.split()
             for p in parts:
@@ -292,6 +312,7 @@ def main() -> None:
             l2_recall = int(line.split("count=")[1])
 
     assert pending == 0, f"pending items remain after drain: {pending}"
+    assert recovery_count_2 >= 1, f"recover_in_flight() did not recover any rows ({recovery_count_2}); test passed vacuously"
     assert drain_promoted >= 1, f"no promoted items: {drain_promoted}"
     assert in_flight == 0, f"in_flight items remain: {in_flight}"
     assert l2_recall >= 1, f"record not found in L2: {l2_recall}"
@@ -334,7 +355,10 @@ def main() -> None:
     l2_after_delete = 0
     delete_promoted = 0
     pending_del = 0
+    recovery_count_4 = 0
     for line in lines4:
+        if line.startswith("CRASH_RECOVERY_COUNT"):
+            recovery_count_4 = int(line.split("recovered=")[1].strip())
         if line.startswith("CRASH_DELETE_DRAIN"):
             parts = line.split()
             for p in parts:
@@ -348,6 +372,7 @@ def main() -> None:
     assert l2_after_delete == 0, \
         f"Resurrection detected: deleted record found in L2 recall ({l2_after_delete})"
     assert delete_promoted >= 1, f"delete not promoted: {delete_promoted}"
+    assert recovery_count_4 >= 1, f"recover_in_flight() did not recover any rows ({recovery_count_4}); test passed vacuously"
     assert pending_del == 0, f"pending items remain after delete drain: {pending_del}"
     print(f"CRASH_NO_RESURRECTION_PASS l2_recall={l2_after_delete} promoted={delete_promoted}", flush=True)
 

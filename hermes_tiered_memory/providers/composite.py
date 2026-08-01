@@ -126,6 +126,7 @@ class CompositeProvider(MemoryProvider):
         self._initialized = False
         self._disabled = False
         self._runtime_config: dict[str, Any] = {}
+        self.last_recovery_count = 0
 
         logger.info(
             f"CompositeProvider initialized for profile={active_profile_identity}, "
@@ -491,6 +492,7 @@ class CompositeProvider(MemoryProvider):
         import uuid
         recovery_owner = f"recovery-{uuid.uuid4().hex[:12]}"
         recovered = self.outbox_store.recover_in_flight(recovery_owner)
+        self.last_recovery_count = recovered
         if recovered:
             logger.info("Drain-on-restart recovered %d in_flight rows", recovered)
 
