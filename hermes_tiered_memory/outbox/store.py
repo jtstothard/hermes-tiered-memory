@@ -524,15 +524,24 @@ class OutboxStore:
 
         return stats
 
-    def recover_in_flight(self, owner_id: str) -> int:
-        """Recover all in_flight rows back to pending on restart.
+    def recover_in_flight(self, owner_id: str, now: int | None = None) -> int:
+        """Recover expired in_flight rows back to pending on restart.
 
-        On restart the previous promotion worker is guaranteed dead (SIGKILL or
-        normal exit), so every in_flight row is orphaned regardless of lease
-        expiry.  Returning them to pending lets the fresh drain loop re-process
-        them, preventing silent data loss after a crash.
+        Only rows whose lease has expired (``lease_expires_at < now``) are
+        recovered.  This preserves concurrent worker safety: a legitimately
+        in-flight row owned by another live worker is not stolen while its
+        lease is still valid.  Rows left orphaned by a crashed worker will
+        have their lease expire naturally, after which the next restart (or
+        the next ``recover_in_flight`` call) returns them to pending so the
+        fresh drain loop can re-process them — preventing silent data loss.
+
+        ``attempt_no`` is intentionally NOT incremented here; the next
+        ``claim_batch()`` increments it on the actual re-claim, keeping
+        recovery idempotent across repeated crash/restart cycles so the
+        retry budget is not prematurely exhausted.
         """
-        now = int(time.time())
+        if now is None:
+            now = int(time.time())
         conn = self._get_connection()
         cursor = conn.execute(
             """UPDATE outbox
@@ -542,16 +551,17 @@ class OutboxStore:
                    lease_id = '',
                    lease_expires_at = 0,
                    fence = 0,
-                   attempt_no = attempt_no + 1,
                    updated_at = ?
                WHERE state = 'in_flight'
+                 AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at < ?
             """,
-            (owner_id, now),
+            (owner_id, now, now),
         )
         conn.commit()
         recovered = cursor.rowcount
         if recovered:
-            logger.info("Recovered %d in_flight rows on restart", recovered)
+            logger.info("Recovered %d expired in_flight rows on restart", recovered)
         return recovered
 
     def close(self) -> None:

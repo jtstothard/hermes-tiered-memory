@@ -115,6 +115,7 @@ shutil.copytree(repo_root / "hermes_tiered_memory", plugin_dir)
     "    bank_mapping:\\n"
     "      disposable: disposable-bank\\n"
     "    batch_size: 1\\n"
+    "    lease_duration_seconds: 2\\n"
     "    retry:\\n"
     "      max_attempts: 3\\n"
     "      backoff_seconds: [0]\\n"
@@ -156,12 +157,12 @@ if action == "store":
     ))
     sid = stored["id"]
     print(f"CRASH_STORE source_id={{sid}}")
-    for _ in range(30):
+    for _ in range(120):
         stats = provider.outbox_store.get_stats()
-        if stats.get("pending", 0) >= 1:
+        if stats.get("in_flight", 0) >= 1:
             break
         time.sleep(0.25)
-    print(f"CRASH_ENQUEUED pending={{provider.outbox_store.get_stats().get('pending', 0)}}")
+    print(f"CRASH_ENQUEUED in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
     (root / "crash_pid").write_text(str(os.getpid()))
     # Stay alive so the parent can SIGKILL us while the promotion worker runs.
     time.sleep(30)
@@ -176,19 +177,20 @@ elif action == "drain":
     stats = provider.outbox_store.get_stats()
     print(f"CRASH_DRAIN pending={{stats['pending']}} promoted={{stats['promoted']}} in_flight={{stats['in_flight']}}")
     recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
-    matching = [r for r in recalled if r.metadata.get("origin") == "mnemosyne" and {token_json} in r.content]
+    expected_doc_id = provider._generate_document_id({src_id_json})
+    matching = [r for r in recalled if r.document_id == expected_doc_id]
     print(f"CRASH_L2_RECALL count={{len(matching)}}")
     provider.close()
 
 elif action == "delete":
     result = json.loads(manager.handle_tool_call("tiered_memory_delete", {{"memory_id": {src_id_json}}}))
     print(f"CRASH_DELETE deleted={{result['deleted']}}")
-    for _ in range(30):
+    for _ in range(120):
         stats = provider.outbox_store.get_stats()
-        if stats.get("pending", 0) >= 1:
+        if stats.get("in_flight", 0) >= 1:
             break
         time.sleep(0.25)
-    print(f"CRASH_DELETE_ENQUEUED pending={{provider.outbox_store.get_stats().get('pending', 0)}}")
+    print(f"CRASH_DELETE_ENQUEUED in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
     (root / "crash_pid").write_text(str(os.getpid()))
     # Stay alive so the parent can SIGKILL us while the delete promotion runs.
     time.sleep(30)
@@ -203,7 +205,8 @@ elif action == "verify-delete":
     stats = provider.outbox_store.get_stats()
     print(f"CRASH_DELETE_DRAIN pending={{stats['pending']}} promoted={{stats['promoted']}}")
     recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
-    matching = [r for r in recalled if {token_json} in r.content]
+    expected_doc_id = provider._generate_document_id({src_id_json})
+    matching = [r for r in recalled if r.document_id == expected_doc_id]
     print(f"CRASH_L2_RECALL count={{len(matching)}}")
     provider.close()
 """
@@ -259,7 +262,7 @@ def main() -> None:
 
     # ---- PHASE 2: restart + drain -------------------------------------------
     print("=== PHASE 2: restart on same state and drain ===", flush=True)
-    code2 = _worker_code("drain", repo_root=str(repo_root),
+    code2 = _worker_code("drain", source_id=source_id, repo_root=str(repo_root),
                          protected_config=str(pc_path), sig=str(sig_path),
                          record_token=record_token)
     script2 = root / "crash_phase2.py"

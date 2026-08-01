@@ -468,6 +468,7 @@ class CompositeProvider(MemoryProvider):
         batch_size = tiered.get("batch_size", 10)
         max_attempts = retry.get("max_attempts", 5)
         retry_delays = retry.get("backoff_seconds", [10, 30, 90, 300])
+        lease_duration_seconds = tiered.get("lease_duration_seconds", 300)
         if (
             isinstance(batch_size, bool)
             or not isinstance(batch_size, int)
@@ -478,6 +479,9 @@ class CompositeProvider(MemoryProvider):
             or not isinstance(retry_delays, list)
             or not retry_delays
             or any(isinstance(delay, bool) or not isinstance(delay, int) or delay < 0 for delay in retry_delays)
+            or isinstance(lease_duration_seconds, bool)
+            or not isinstance(lease_duration_seconds, int)
+            or lease_duration_seconds < 1
         ):
             raise RuntimeError("tiered worker settings are invalid")
         # Drain-on-restart: recover any expired in_flight rows before starting
@@ -494,6 +498,7 @@ class CompositeProvider(MemoryProvider):
             batch_size=batch_size,
             retry_delays_seconds=retry_delays,
             max_attempts_per_cycle=max_attempts,
+            lease_duration_seconds=lease_duration_seconds,
         )
         self.promotion_worker = PromotionWorker(
             outbox_store=self.outbox_store,
