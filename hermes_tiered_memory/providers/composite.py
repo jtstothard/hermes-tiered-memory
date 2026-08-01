@@ -480,6 +480,16 @@ class CompositeProvider(MemoryProvider):
             or any(isinstance(delay, bool) or not isinstance(delay, int) or delay < 0 for delay in retry_delays)
         ):
             raise RuntimeError("tiered worker settings are invalid")
+        # Drain-on-restart: recover any expired in_flight rows before starting
+        # the worker.  This handles SIGKILL during promotion: the previous
+        # process's leased rows are returned to pending so the fresh worker
+        # re-processes them.
+        import uuid
+        recovery_owner = f"recovery-{uuid.uuid4().hex[:12]}"
+        recovered = self.outbox_store.recover_in_flight(recovery_owner)
+        if recovered:
+            logger.info("Drain-on-restart recovered %d in_flight rows", recovered)
+
         config = WorkerConfig(
             batch_size=batch_size,
             retry_delays_seconds=retry_delays,

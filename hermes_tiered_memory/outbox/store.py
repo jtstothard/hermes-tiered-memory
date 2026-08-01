@@ -8,10 +8,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import Any
 
 from hermes_tiered_memory.adapters.l1 import L1Record
+
+logger = logging.getLogger(__name__)
 
 
 class OutboxState(str, Enum):
@@ -520,6 +523,36 @@ class OutboxStore:
             stats[state.value] = cursor.fetchone()[0]
 
         return stats
+
+    def recover_in_flight(self, owner_id: str) -> int:
+        """Recover all in_flight rows back to pending on restart.
+
+        On restart the previous promotion worker is guaranteed dead (SIGKILL or
+        normal exit), so every in_flight row is orphaned regardless of lease
+        expiry.  Returning them to pending lets the fresh drain loop re-process
+        them, preventing silent data loss after a crash.
+        """
+        now = int(time.time())
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """UPDATE outbox
+               SET state = 'pending',
+                   state_version = state_version + 1,
+                   owner_id = ?,
+                   lease_id = '',
+                   lease_expires_at = 0,
+                   fence = 0,
+                   attempt_no = attempt_no + 1,
+                   updated_at = ?
+               WHERE state = 'in_flight'
+            """,
+            (owner_id, now),
+        )
+        conn.commit()
+        recovered = cursor.rowcount
+        if recovered:
+            logger.info("Recovered %d in_flight rows on restart", recovered)
+        return recovered
 
     def close(self) -> None:
         """Close the database connection."""
