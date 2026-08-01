@@ -14,9 +14,11 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -59,24 +61,51 @@ def _write_protected_config(root: Path, port: int) -> tuple[Path, Path]:
     return config_path, signature_path
 
 
-def _collect_output(proc: subprocess.Popen, timeout: float = 15, keep_alive: bool = False) -> list[str]:
-    """Collect stdout lines from *proc*.
+def _collect_output(proc: subprocess.Popen, timeout: float = 15, keep_alive: bool = False,
+                    ready_marker: str | None = None) -> list[str]:
+    """Collect stdout lines from *proc* using a reader thread.
 
-    When *keep_alive* is False (default) the process is expected to exit on its
-    own and we ``wait()`` for it.  When True the process is intentionally left
-    running so the caller can SIGKILL it — we collect whatever lines appeared
-    within *timeout* and return without waiting.
+    When *ready_marker* is set, returns immediately once a line starting with
+    that marker is observed (process still alive). Otherwise collects until
+    timeout or process exit.
+
+    This replaces the old blocking ``readline()`` approach which blocked until
+    the child wrote a line or exited — meaning the deadline check only ran
+    *after* readline returned.  With the reader thread, ``readline()`` runs in
+    a daemon thread; the main loop pulls from a queue with a short timeout and
+    can return as soon as the readiness marker appears while the process is
+    still alive (so the parent can SIGKILL a live process, not a corpse).
     """
     lines: list[str] = []
+    line_queue: queue.Queue = queue.Queue()
+
+    def _reader():
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                line_queue.put(raw)
+        except (OSError, ValueError):
+            pass
+        line_queue.put(None)  # sentinel: EOF
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        line = proc.stdout.readline()
-        if not line:
+        try:
+            raw = line_queue.get(timeout=0.1)
+        except queue.Empty:
+            if proc.poll() is not None:
+                break
+            continue
+        if raw is None:
             break
-        s = line.decode().strip()
+        s = raw.decode().strip()
         if s:
             lines.append(s)
             print(f"  [{proc.pid}] {s}", flush=True)
+            if ready_marker and s.startswith(ready_marker):
+                return lines
     if not keep_alive:
         proc.wait(timeout=max(timeout, 5))
     return lines
@@ -160,16 +189,19 @@ if action == "store":
         {{"content": {token_json} + ": durable SIGKILL test", "metadata": {{"scenario": "crash-recovery", "tag": "sigkill"}}}},
     ))
     sid = stored["id"]
-    print(f"CRASH_STORE source_id={{sid}}")
+    print(f"CRASH_STORE source_id={{sid}}", flush=True)
     # Manually claim the pending row so it is in_flight with a short lease.
     items = provider.outbox_store.claim_batch(
         batch_size=1, owner_id="crash-test-owner",
         lease_id="crash-test-lease", lease_duration_seconds=2,
     )
-    print(f"CRASH_ENQUEUED claimed={{len(items)}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    assert len(items) == 1, f"expected 1 claimed item, got {{len(items)}}"
+    print(f"CRASH_ENQUEUED claimed={{len(items)}} row_id={{items[0].row_id}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}", flush=True)
     # Wait for the 2s lease to expire so recover_in_flight can recover it.
     time.sleep(3)
-    (root / "crash_pid").write_text(str(os.getpid()))
+    # Signal readiness AFTER lease expiry so the parent kills us with an
+    # expired-but-unprocessed in_flight row still in the outbox.
+    print("CRASH_READY", flush=True)
     # Stay alive so the parent can SIGKILL us while the expired in_flight row sits.
     time.sleep(30)
 
@@ -198,31 +230,33 @@ elif action == "delete":
     # Stop the promotion worker so it cannot promote the delete before SIGKILL.
     provider.promotion_worker.stop()
     result = json.loads(manager.handle_tool_call("tiered_memory_delete", {{"memory_id": {src_id_json}}}))
-    print(f"CRASH_DELETE deleted={{result['deleted']}}")
+    print(f"CRASH_DELETE deleted={{result['deleted']}}", flush=True)
     # Manually claim the pending delete row so it is in_flight with a short lease.
     items = provider.outbox_store.claim_batch(
         batch_size=1, owner_id="crash-test-owner",
         lease_id="crash-test-lease", lease_duration_seconds=2,
     )
-    print(f"CRASH_DELETE_ENQUEUED claimed={{len(items)}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}")
+    assert len(items) == 1, f"expected 1 claimed item, got {{len(items)}}"
+    print(f"CRASH_DELETE_ENQUEUED claimed={{len(items)}} row_id={{items[0].row_id}} in_flight={{provider.outbox_store.get_stats().get('in_flight', 0)}}", flush=True)
     # Wait for the 2s lease to expire so recover_in_flight can recover it.
     time.sleep(3)
-    (root / "crash_pid").write_text(str(os.getpid()))
+    print("CRASH_DELETE_READY", flush=True)
     # Stay alive so the parent can SIGKILL us while the expired in_flight row sits.
     time.sleep(30)
 
 elif action == "verify-delete":
+    promoted_before = provider.outbox_store.get_stats().get("promoted", 0)
     print(f"CRASH_RECOVERY_COUNT recovered={{provider.last_recovery_count}}")
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         stats = provider.outbox_store.get_stats()
-        if stats.get("pending", 0) == 0 and stats.get("in_flight", 0) == 0 and stats.get("promoted", 0) >= 1:
+        if stats.get("pending", 0) == 0 and stats.get("in_flight", 0) == 0 and stats.get("promoted", 0) >= promoted_before + 1:
             break
         time.sleep(0.25)
     stats = provider.outbox_store.get_stats()
-    print(f"CRASH_DELETE_DRAIN pending={{stats['pending']}} promoted={{stats['promoted']}}")
-    recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
+    print(f"CRASH_DELETE_DRAIN pending={{stats['pending']}} promoted={{stats['promoted']}} promoted_before={{promoted_before}}")
     expected_doc_id = provider._generate_document_id({src_id_json})
+    recalled = provider.l2_adapter.recall({token_json}, "disposable", limit=10)
     matching = [r for r in recalled if r.document_id == expected_doc_id]
     print(f"CRASH_L2_RECALL count={{len(matching)}}")
     provider.close()
@@ -261,7 +295,7 @@ def main() -> None:
         [venv_python, str(script1)],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(repo_root),
     )
-    lines = _collect_output(proc, timeout=10, keep_alive=True)
+    lines = _collect_output(proc, timeout=10, keep_alive=True, ready_marker="CRASH_READY")
 
     source_id = None
     for line in lines:
@@ -270,11 +304,12 @@ def main() -> None:
     assert source_id, f"no source_id from store: {lines}"
     print(f"source_id={source_id}", flush=True)
 
-    pid_path = root / "crash_pid"
-    worker_pid = int(pid_path.read_text().strip())
-    print(f"SIGKILL worker pid={worker_pid}", flush=True)
-    os.kill(worker_pid, signal.SIGKILL)
+    # Use proc.pid directly — the worker's crash_pid file is written after a
+    # 3s sleep (lease expiry) and may not exist yet when the ready marker fires.
+    print(f"SIGKILL worker pid={proc.pid}", flush=True)
+    os.kill(proc.pid, signal.SIGKILL)
     proc.wait(timeout=5)
+    assert proc.returncode == -9, f"worker was not killed by SIGKILL (exit={proc.returncode}); the readline blocking bug may persist"
     print(f"killed exit={proc.returncode}", flush=True)
 
     # ---- PHASE 2: restart + drain -------------------------------------------
@@ -330,17 +365,17 @@ def main() -> None:
         [venv_python, str(script3)],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(repo_root),
     )
-    lines3 = _collect_output(proc3, timeout=10, keep_alive=True)
+    lines3 = _collect_output(proc3, timeout=10, keep_alive=True, ready_marker="CRASH_DELETE_READY")
 
-    pid_path3 = root / "crash_pid"
-    worker_pid3 = int(pid_path3.read_text().strip())
-    print(f"SIGKILL delete worker pid={worker_pid3}", flush=True)
-    os.kill(worker_pid3, signal.SIGKILL)
+    # Use proc3.pid directly — same rationale as phase 1.
+    print(f"SIGKILL delete worker pid={proc3.pid}", flush=True)
+    os.kill(proc3.pid, signal.SIGKILL)
     proc3.wait(timeout=5)
+    assert proc3.returncode == -9, f"delete worker was not killed by SIGKILL (exit={proc3.returncode})"
     print(f"delete worker killed exit={proc3.returncode}", flush=True)
 
     # Phase 3b: restart and verify delete drained + no resurrection
-    code4 = _worker_code("verify-delete", repo_root=str(repo_root),
+    code4 = _worker_code("verify-delete", source_id=source_id, repo_root=str(repo_root),
                          protected_config=str(pc_path), sig=str(sig_path),
                          record_token=record_token)
     script4 = root / "crash_phase4.py"
@@ -354,6 +389,7 @@ def main() -> None:
 
     l2_after_delete = 0
     delete_promoted = 0
+    promoted_before = 0
     pending_del = 0
     recovery_count_4 = 0
     for line in lines4:
@@ -366,12 +402,15 @@ def main() -> None:
                     delete_promoted = int(p.split("=")[1].strip(","))
                 if p.startswith("pending="):
                     pending_del = int(p.split("=")[1].strip(","))
+                if p.startswith("promoted_before="):
+                    promoted_before = int(p.split("=")[1].strip(","))
         if line.startswith("CRASH_L2_RECALL"):
             l2_after_delete = int(line.split("count=")[1])
 
     assert l2_after_delete == 0, \
         f"Resurrection detected: deleted record found in L2 recall ({l2_after_delete})"
-    assert delete_promoted >= 1, f"delete not promoted: {delete_promoted}"
+    assert delete_promoted >= promoted_before + 1, \
+        f"delete not promoted: {delete_promoted} (before={promoted_before}, need delta >= 1)"
     assert recovery_count_4 >= 1, f"recover_in_flight() did not recover any rows ({recovery_count_4}); test passed vacuously"
     assert pending_del == 0, f"pending items remain after delete drain: {pending_del}"
     print(f"CRASH_NO_RESURRECTION_PASS l2_recall={l2_after_delete} promoted={delete_promoted}", flush=True)
