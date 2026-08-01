@@ -8,10 +8,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import Any
 
 from hermes_tiered_memory.adapters.l1 import L1Record
+
+logger = logging.getLogger(__name__)
 
 
 class OutboxState(str, Enum):
@@ -520,6 +523,46 @@ class OutboxStore:
             stats[state.value] = cursor.fetchone()[0]
 
         return stats
+
+    def recover_in_flight(self, owner_id: str, now: int | None = None) -> int:
+        """Recover expired in_flight rows back to pending on restart.
+
+        Only rows whose lease has expired (``lease_expires_at < now``) are
+        recovered.  This preserves concurrent worker safety: a legitimately
+        in-flight row owned by another live worker is not stolen while its
+        lease is still valid.  Rows left orphaned by a crashed worker will
+        have their lease expire naturally, after which the next restart (or
+        the next ``recover_in_flight`` call) returns them to pending so the
+        fresh drain loop can re-process them — preventing silent data loss.
+
+        ``attempt_no`` is intentionally NOT incremented here; the next
+        ``claim_batch()`` increments it on the actual re-claim, keeping
+        recovery idempotent across repeated crash/restart cycles so the
+        retry budget is not prematurely exhausted.
+        """
+        if now is None:
+            now = int(time.time())
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """UPDATE outbox
+               SET state = 'pending',
+                   state_version = state_version + 1,
+                   owner_id = ?,
+                   lease_id = '',
+                   lease_expires_at = 0,
+                   fence = 0,
+                   updated_at = ?
+               WHERE state = 'in_flight'
+                 AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at < ?
+            """,
+            (owner_id, now, now),
+        )
+        conn.commit()
+        recovered = cursor.rowcount
+        if recovered:
+            logger.info("Recovered %d expired in_flight rows on restart", recovered)
+        return recovered
 
     def close(self) -> None:
         """Close the database connection."""

@@ -23,6 +23,19 @@ def _run_teardown(root: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_teardown_removes_any_disposable_hermes_tiered_memory_root() -> None:
+    root = Path("/tmp") / f"hermes-tiered-memory-acceptance-{uuid.uuid4().hex}"
+    root.mkdir()
+    (root / "state").mkdir()
+    (root / "synthetic-state").write_text("safe to delete")
+
+    result = _run_teardown(root)
+
+    assert result.returncode == 0, result.stderr
+    assert not root.exists()
+    assert "TOPOLOGY_TORN_DOWN" in result.stdout
+
+
 def test_teardown_removes_disposable_https_ca_and_server_material() -> None:
     root = Path("/tmp") / f"hermes-tiered-memory-https-{uuid.uuid4().hex}"
     tls_dir = root / "tls"
