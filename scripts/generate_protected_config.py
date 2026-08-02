@@ -50,7 +50,9 @@ def _write_file_strict(path: Path, data: bytes, *, force: bool) -> None:
         raise SystemExit(f"refusing to overwrite existing file: {path} (use --force)")
     path.parent.mkdir(parents=True, exist_ok=True)
     # O_CREAT | O_EXCL avoids a TOCTOU overwrite race when force is not set.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    # O_NOFOLLOW rejects symlinks at the output path on both paths, preventing
+    # a forced write from following a symlink to an unintended target.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     if not force:
         flags |= os.O_EXCL
     fd = os.open(path, flags, 0o600)

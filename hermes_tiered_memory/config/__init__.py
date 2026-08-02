@@ -134,9 +134,9 @@ class ProtectedConfigLoader:
                 raise ProtectedConfigValidationError(
                     "verification key entry requires a non-empty key_id"
                 )
-            if key_id in staged or key_id in cls._pinned_keys:
+            if key_id in staged:
                 raise ProtectedConfigValidationError(
-                    f"Duplicate verification key_id: {key_id}"
+                    f"Duplicate verification key_id within this call: {key_id}"
                 )
             algorithm = entry.get("algorithm")
             if algorithm not in cls.SUPPORTED_ALGORITHMS:
@@ -155,7 +155,7 @@ class ProtectedConfigLoader:
                         f"Ed25519 public key for {key_id!r} must be 32 bytes, "
                         f"got {len(public_key)}"
                     )
-                staged[key_id] = (public_key,)
+                resolved_material: bytes | tuple[bytes, ...] = (public_key,)
             else:  # hmac-sha-256
                 material_b64 = entry.get("secret_b64")
                 if not isinstance(material_b64, str) or not material_b64:
@@ -167,7 +167,21 @@ class ProtectedConfigLoader:
                     raise ProtectedConfigValidationError(
                         f"HMAC secret for {key_id!r} must not be empty"
                     )
-                staged[key_id] = secret
+                resolved_material = secret
+            # Idempotent re-registration: allow the same key_id if the
+            # material is identical (handles provider retry / multiple
+            # providers sharing one config in one process).  Conflicting
+            # material for an already-pinned key_id is rejected.
+            existing = cls._pinned_keys.get(key_id)
+            if existing is not None:
+                if existing != resolved_material:
+                    raise ProtectedConfigValidationError(
+                        f"verification key_id {key_id!r} is already pinned "
+                        f"with different material"
+                    )
+                # Identical re-registration: skip silently.
+                continue
+            staged[key_id] = resolved_material
         # Commit only after every entry validated.
         cls._pinned_keys.update(staged)
 

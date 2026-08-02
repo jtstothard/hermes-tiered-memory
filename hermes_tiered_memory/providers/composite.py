@@ -403,7 +403,9 @@ class CompositeProvider(MemoryProvider):
 
         raw = tiered_config.get("verification_keys", [])
         if raw is None:
-            raw = []
+            raise RuntimeError(
+                "tiered.verification_keys must be a list of key entries, not null"
+            )
         if not isinstance(raw, list):
             raise RuntimeError(
                 "tiered.verification_keys must be a list of key entries"

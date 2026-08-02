@@ -240,11 +240,28 @@ def test_malformed_entry_does_not_register_valid_siblings():
     assert ProtectedConfigLoader._pinned_keys == {}
 
 
-def test_duplicate_key_id_across_calls_fails_closed():
+def test_duplicate_key_id_across_calls_identical_is_idempotent():
+    """Re-registering the same key_id with identical material is idempotent.
+
+    This covers provider retry and multiple providers sharing one config in
+    one process — a legitimate operational pattern that must not fail.
+    """
     private_key, public_bytes = _ed25519_keypair()
     ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", public_bytes)])
-    with pytest.raises(ProtectedConfigValidationError, match="Duplicate verification key_id"):
-        ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", public_bytes)])
+    # Identical re-registration must succeed silently.
+    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", public_bytes)])
+    assert "dup" in ProtectedConfigLoader._pinned_keys
+
+
+def test_duplicate_key_id_across_calls_conflicting_material_fails_closed():
+    """Re-registering a key_id with DIFFERENT material must fail closed."""
+    private_key, public_bytes = _ed25519_keypair()
+    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", public_bytes)])
+    _, different_public_bytes = _ed25519_keypair()
+    with pytest.raises(ProtectedConfigValidationError, match="already pinned"):
+        ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", different_public_bytes)])
+    # The original key must remain unchanged.
+    assert ProtectedConfigLoader._pinned_keys["dup"] == (public_bytes,)
 
 
 def test_non_list_entries_rejected():
