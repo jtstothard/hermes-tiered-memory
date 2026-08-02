@@ -28,7 +28,8 @@ dependencies = [
 
 [project.optional-dependencies]
 mnemosyne = [
-    "mnemosyne>=3.14.0,<4.0.0",
+    # The PyPI distribution is "mnemosyne-memory"; the importable module is "mnemosyne".
+    "mnemosyne-memory>=3.14.0,<4.0.0",
 ]
 hindsight = [
     "hindsight-client>=0.8.6,<1.0.0",
