@@ -15,6 +15,10 @@
 #
 set -euo pipefail
 
+# Respect PYTHON override so operators can target a specific interpreter
+# (e.g. a Hermes runtime venv on PEP 668 systems). Defaults to python3.
+PYTHON="${PYTHON:-python3}"
+
 PLUGIN_NAME="tiered-memory"
 PLUGIN_DESCRIPTION="Fail-closed composite-provider: hot L1 (Mnemosyne/SQLite) + warm L2 (Hindsight) for Hermes memory"
 
@@ -39,10 +43,10 @@ HERMES_HOME="$(cd "$HERMES_HOME" && pwd)"
 # --- 1. pip install the wheel ---------------------------------------------
 
 echo ">> Installing wheel into current Python environment..."
-python3 -m pip install --upgrade "$WHEEL_PATH" || die "pip install failed"
+"$PYTHON" -m pip install --upgrade "$WHEEL_PATH" || die "pip install failed"
 
 # Verify the package is importable
-python3 -c "import hermes_tiered_memory; print('hermes_tiered_memory', hermes_tiered_memory.__version__)" \
+"$PYTHON" -c "import hermes_tiered_memory; print('hermes_tiered_memory', hermes_tiered_memory.__version__)" \
     || die "Package import check failed — wheel installed but not importable"
 
 # --- 2. Lay the plugin shim -----------------------------------------------
