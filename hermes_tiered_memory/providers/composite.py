@@ -358,6 +358,12 @@ class CompositeProvider(MemoryProvider):
         config = self._runtime_config or (self.session.config if self.session else {})
         tiered_config = config.get("tiered", {})
 
+        # Register pinned verification keys from the config block before
+        # loading. Without this seam _pinned_keys is empty and every signed
+        # config fails with "Unauthorized key_id" (Gap 2). This is the only
+        # production key-provisioning path; register_key() remains test-only.
+        self._register_verification_keys(tiered_config)
+
         protected_config_path = tiered_config.get("protected_config", {}).get("path")
         signature_path = tiered_config.get("protected_config", {}).get("signature", {}).get("path")
 
@@ -382,6 +388,33 @@ class CompositeProvider(MemoryProvider):
             raise RuntimeError(
                 "Protected Hindsight configuration is invalid; "
                 "composite provider startup aborted"
+            ) from e
+
+    def _register_verification_keys(self, tiered_config: dict[str, Any]) -> None:
+        """Register pinned verification keys declared in the tiered config block.
+
+        Reads ``tiered.verification_keys`` (a list of key entries) and registers
+        each via :meth:`ProtectedConfigLoader.register_verification_keys`. The
+        list is optional: an absent key is ``[]`` and the loader then fails
+        closed on any signed config with an unregistered key_id, preserving the
+        existing fail-closed behavior. Malformed entries fail closed at startup.
+        """
+        from hermes_tiered_memory.config import ProtectedConfigValidationError
+
+        raw = tiered_config.get("verification_keys", [])
+        if raw is None:
+            raise RuntimeError(
+                "tiered.verification_keys must be a list of key entries, not null"
+            )
+        if not isinstance(raw, list):
+            raise RuntimeError(
+                "tiered.verification_keys must be a list of key entries"
+            )
+        try:
+            ProtectedConfigLoader.register_verification_keys(raw)
+        except ProtectedConfigValidationError as e:
+            raise RuntimeError(
+                f"tiered.verification_keys is invalid: {e}"
             ) from e
 
     def _initialize_l1(self) -> None:

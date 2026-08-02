@@ -94,9 +94,68 @@ Create a protected configuration file (JCS JSON, RFC 8785):
 
 ### Integrity Authentication
 
-Compute HMAC-SHA-256 as `HMAC(secret, DOMAIN_SEPARATOR + exact_JCS_bytes)` (or Ed25519 over the same domain-separated bytes), with domain separator `hermes-tiered-memory/config/v1\\0`. The file bytes must be exactly canonical JCS JSON; whitespace or alternate JSON spellings are rejected.
+Compute HMAC-SHA-256 as `HMAC(secret, DOMAIN_SEPARATOR + exact_JCS_bytes)` (or Ed25519 over the same domain-separated bytes), with domain separator `hermes-tiered-memory/config/v1\0`. The file bytes must be exactly canonical JCS JSON; whitespace or alternate JSON spellings are rejected.
 
 Store the signature in a separate file (or secret-store object).
+
+### Pinned Verification Keys
+
+The loader authenticates a protected config against a set of **pinned verification keys**. An unknown `key_id`, a missing signature, a wrong algorithm, a stale config, or a rollback attempt all fail closed: the composite provider aborts startup and no adapter or network side effect occurs.
+
+Keys are provisioned through the `tiered.verification_keys` config block. This is the only production key source — environment variables are intentionally not consulted, and the in-process `register_key()` helper is test-only. Each entry pins one key:
+
+```yaml
+memory:
+  tiered:
+    verification_keys:
+      - key_id: "admin-ed25519-1"
+        algorithm: "ed25519"            # or "hmac-sha-256"
+        public_key_b64: "<base64-encoded 32-byte Ed25519 public key>"
+        # For HMAC use secret_b64 instead of public_key_b64.
+```
+
+Validation is strict and atomic: a non-empty `key_id`, a supported `algorithm`, correctly-lengthed base64 material, and no duplicate `key_id` (within the list or against an already-pinned key). If any entry is malformed, **nothing** is registered and startup fails closed.
+
+### Complete Ed25519 Provisioning Example
+
+1. **Generate a keypair** (do this once, offline; keep the private key secret):
+
+```bash
+python scripts/generate_protected_config.py genkey --key-id admin-ed25519-1
+# writes admin-ed25519-1.private.pem and prints the public_key_b64
+```
+
+2. **Mint the canonical config and detached signature**:
+
+```bash
+python scripts/generate_protected_config.py sign \
+  --private-key admin-ed25519-1.private.pem \
+  --key-id admin-ed25519-1 \
+  --config-id prod-hindsight-v1 \
+  --host hindsight.example.com \
+  --base-path /api/v1 \
+  --not-before 2026-08-01T00:00:00Z \
+  --expires-at 2027-08-01T00:00:00Z \
+  --out protected-hindsight.json --sig protected-hindsight.sig
+```
+
+3. **Place the public key in the Hermes config** (profile-owned, mode 0600):
+
+```yaml
+memory:
+  provider: tiered
+  tiered:
+    verification_keys:
+      - key_id: "admin-ed25519-1"
+        algorithm: "ed25519"
+        public_key_b64: "<printed by genkey>"
+    protected_config:
+      path: "/path/to/protected-hindsight.json"
+      signature:
+        path: "/path/to/protected-hindsight.sig"
+```
+
+4. The signed config now loads end-to-end with no test-only key registration.
 
 ### Hermes Configuration
 
@@ -132,6 +191,14 @@ memory:
       backoff_seconds: [10, 30, 90, 300]
     reconciliation:
       interval_seconds: 1800  # 30 minutes
+
+    # Pinned verification keys (required in production; see "Pinned
+    # Verification Keys" above). Without these the loader has no authorized
+    # key_id and every signed config fails closed.
+    verification_keys:
+      - key_id: "admin-key-1"
+        algorithm: "ed25519"
+        public_key_b64: "<base64-encoded 32-byte Ed25519 public key>"
 
     # Protected configuration source
     protected_config:
@@ -206,6 +273,9 @@ hermes_tiered_memory/
 │   └── worker.py         # Promotion worker
 └── providers/
     └── composite.py     # Main composite provider
+
+scripts/
+└── generate_protected_config.py  # Provisioning helper (genkey + sign)
 
 tests/
 ├── unit/                # Unit tests
