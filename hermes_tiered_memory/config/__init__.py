@@ -86,19 +86,104 @@ class ProtectedConfigLoader:
     ALGORITHM_ED25519 = "ed25519"
     SUPPORTED_ALGORITHMS = {ALGORITHM_HMAC_SHA256, ALGORITHM_ED25519}
 
-    # Pinned authorized keys (key_id -> secret for HMAC, public key for Ed25519)
-    # In production, these would be loaded from a secure key store
-    _pinned_keys: dict[str, bytes | tuple[bytes, bytes]] = {}
+    # Pinned authorized keys (key_id -> secret for HMAC, public key for Ed25519).
+    # Populated in production by register_verification_keys() from the tiered
+    # runtime config block, and in tests by register_key().  For Ed25519 only
+    # the first tuple element (the public key) is ever consulted by
+    # _validate_signature(), so a single-element envelope is sufficient.
+    _pinned_keys: dict[str, bytes | tuple[bytes, ...]] = {}
 
     @classmethod
-    def register_key(cls, key_id: str, secret_or_keypair: bytes | tuple[bytes, bytes]) -> None:
-        """Register a pinned authorized key."""
+    def register_key(cls, key_id: str, secret_or_keypair: bytes | tuple[bytes, ...]) -> None:
+        """Register a pinned authorized key (used by test fixtures)."""
         cls._pinned_keys[key_id] = secret_or_keypair
 
     @classmethod
     def clear_keys(cls) -> None:
         """Clear all pinned keys (for testing)."""
         cls._pinned_keys.clear()
+
+    @classmethod
+    def register_verification_keys(cls, entries: list[dict[str, Any]]) -> None:
+        """Register pinned verification keys from the tiered runtime config block.
+
+        Each entry must be a mapping with:
+          - ``key_id``: non-empty string (unique within this call and not already pinned)
+          - ``algorithm``: one of SUPPORTED_ALGORITHMS (``ed25519`` or ``hmac-sha-256``)
+          - Ed25519: ``public_key_b64`` decoding to exactly 32 raw bytes
+          - HMAC: ``secret_b64`` decoding to at least 1 raw byte
+
+        Registration is atomic: if any entry is malformed (or a ``key_id``
+        duplicates one already pinned or one earlier in the same call), nothing
+        is registered.  The caller validates the surrounding
+        ``tiered.verification_keys`` structure; this method validates each entry
+        and cross-entry ``key_id`` uniqueness.
+        """
+        if not isinstance(entries, list):
+            raise ProtectedConfigValidationError(
+                "verification_keys must be a list of key entries"
+            )
+        staged: dict[str, bytes | tuple[bytes, ...]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ProtectedConfigValidationError(
+                    "Each verification key entry must be a mapping"
+                )
+            key_id = entry.get("key_id")
+            if not isinstance(key_id, str) or not key_id or key_id != key_id.strip():
+                raise ProtectedConfigValidationError(
+                    "verification key entry requires a non-empty key_id"
+                )
+            if key_id in staged or key_id in cls._pinned_keys:
+                raise ProtectedConfigValidationError(
+                    f"Duplicate verification key_id: {key_id}"
+                )
+            algorithm = entry.get("algorithm")
+            if algorithm not in cls.SUPPORTED_ALGORITHMS:
+                raise ProtectedConfigValidationError(
+                    f"Unsupported verification key algorithm: {algorithm!r}"
+                )
+            if algorithm == cls.ALGORITHM_ED25519:
+                material_b64 = entry.get("public_key_b64")
+                if not isinstance(material_b64, str) or not material_b64:
+                    raise ProtectedConfigValidationError(
+                        f"Ed25519 verification key {key_id!r} requires public_key_b64"
+                    )
+                public_key = cls._decode_key_material(material_b64, key_id)
+                if len(public_key) != 32:
+                    raise ProtectedConfigValidationError(
+                        f"Ed25519 public key for {key_id!r} must be 32 bytes, "
+                        f"got {len(public_key)}"
+                    )
+                staged[key_id] = (public_key,)
+            else:  # hmac-sha-256
+                material_b64 = entry.get("secret_b64")
+                if not isinstance(material_b64, str) or not material_b64:
+                    raise ProtectedConfigValidationError(
+                        f"HMAC verification key {key_id!r} requires secret_b64"
+                    )
+                secret = cls._decode_key_material(material_b64, key_id)
+                if not secret:
+                    raise ProtectedConfigValidationError(
+                        f"HMAC secret for {key_id!r} must not be empty"
+                    )
+                staged[key_id] = secret
+        # Commit only after every entry validated.
+        cls._pinned_keys.update(staged)
+
+    @staticmethod
+    def _decode_key_material(material_b64: str, key_id: str) -> bytes:
+        """Decode and validate base64 key material for a verification key."""
+        import base64
+        import binascii
+
+        try:
+            material = base64.b64decode(material_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ProtectedConfigValidationError(
+                f"Invalid base64 key material for {key_id!r}: {e}"
+            ) from e
+        return material
 
     def __init__(self, config_path: pathlib.Path, signature_path: pathlib.Path | None = None, replay_state_path: pathlib.Path | None = None):
         """Initialize the loader with configuration and optional signature paths."""
