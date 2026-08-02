@@ -23,3 +23,100 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -e '.[test]'
       - name: Run full baseline suite
         run: python -m pytest -q
+
+  loader-discovery:
+    name: Loader discovery gate (real Hermes loader)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # --- read the pinned Hermes commit from e2e-topology/pins.json -------
+      - name: Read pinned Hermes commit
+        id: pin
+        run: |
+          COMMIT=$(python -c "import json; print(json.load(open('e2e-topology/pins.json'))['components']['hermes']['commit'])")
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
+      # --- shallow-clone the pinned Hermes loader ---------------------------
+      - name: Clone pinned Hermes agent
+        run: |
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+          cd /tmp/hermes-agent
+          git fetch --depth 1 origin ${{ steps.pin.outputs.commit }}
+          git checkout ${{ steps.pin.outputs.commit }}
+
+      # --- build wheel, run install script, assert discovery ---------------
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Install plugin into temp HERMES_HOME
+        run: |
+          TMP_HOME=$(mktemp -d)
+          scripts/install_plugin.sh dist/hermes_tiered_memory-0.1.0-py3-none-any.whl "$TMP_HOME"
+          echo "HERMES_HOME=$TMP_HOME" >> "$GITHUB_ENV"
+
+      - name: Assert wheel has no secrets or local DBs
+        run: |
+          python - << 'PY'
+          import zipfile, sys
+          wheel = "dist/hermes_tiered_memory-0.1.0-py3-none-any.whl"
+          forbidden = (".env", ".sqlite", ".db", ".key", ".pem", "secret", "credential")
+          with zipfile.ZipFile(wheel) as zf:
+              names = zf.namelist()
+          hits = [n for n in names if any(f in n.lower() for f in forbidden)]
+          if hits:
+              print("FORBIDDEN FILES IN WHEEL:", hits, file=sys.stderr)
+              sys.exit(1)
+          print(f"Wheel clean: {len(names)} files, no secrets/DBs")
+          PY
+
+      - name: Run real loader discovery proof
+        env:
+          PYTHONPATH: /tmp/hermes-agent
+        run: |
+          python - << 'PY'
+          import sys, os, tempfile
+
+          # Ensure the pinned loader is importable
+          assert "/tmp/hermes-agent" in sys.path or "PYTHONPATH" in os.environ, "hermes-agent not on path"
+
+          # Purge any cached modules so discovery re-scans
+          for mod in list(sys.modules):
+              if mod.startswith("hermes_constants") or mod.startswith("plugins.memory"):
+                  del sys.modules[mod]
+
+          from plugins.memory import (
+              list_memory_provider_names,
+              discover_memory_providers,
+              load_memory_provider,
+              find_provider_dir,
+          )
+
+          # 1. Discovery by name
+          names = list_memory_provider_names()
+          assert "tiered-memory" in names, f"tiered-memory not discovered: {names}"
+          print(f"list_memory_provider_names: {names}")
+
+          # 2. Provider dir resolves
+          d = find_provider_dir("tiered-memory")
+          assert d is not None and d.is_dir(), "provider dir not found"
+          print(f"find_provider_dir: {d}")
+
+          # 3. discover_memory_providers includes it
+          results = discover_memory_providers()
+          assert any(r[0] == "tiered-memory" for r in results), f"not in discover results: {results}"
+          print(f"discover_memory_providers: {results}")
+
+          # 4. Load attempt — import path must succeed even if is_available() is False
+          provider = load_memory_provider("tiered-memory")
+          print(f"load_memory_provider: {provider}")
+
+          print("\nAll discovery gates passed.")
+          PY
