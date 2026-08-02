@@ -50,6 +50,15 @@ jobs:
           git fetch --depth 1 origin ${{ steps.pin.outputs.commit }}
           git checkout ${{ steps.pin.outputs.commit }}
 
+      # The proof imports the real Hermes loader (plugins.memory.__init__),
+      # which transitively imports hermes_cli.config -> yaml (pyyaml) and
+      # other runtime deps. Cloning alone leaves them absent. Install the
+      # pinned hermes-agent so its dependency closure resolves, mirroring a
+      # real install. Keep the source tree on PYTHONPATH so the proof runs
+      # against this exact pinned commit, not the installed copy.
+      - name: Install pinned Hermes runtime deps
+        run: python -m pip install /tmp/hermes-agent
+
       # --- build wheel, run install script, assert discovery ---------------
       - name: Build wheel
         run: |
