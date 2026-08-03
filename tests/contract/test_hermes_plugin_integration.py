@@ -126,6 +126,8 @@ memory:
   tiered:
     bank_mapping:
       disposable: disposable-bank
+    hindsight:
+      auth_mode: api_key
 profiles:
   disposable:
     secrets:
@@ -153,7 +155,10 @@ profiles:
 
     assert len(captured) == 1
     runtime_config = captured[0]
-    assert runtime_config["tiered"] == {"bank_mapping": {"disposable": "disposable-bank"}}
+    assert runtime_config["tiered"] == {
+        "bank_mapping": {"disposable": "disposable-bank"},
+        "hindsight": {"auth_mode": "api_key"},
+    }
     assert runtime_config["memory"]["tiered"] == runtime_config["tiered"]
     assert runtime_config["profiles"]["disposable"]["secrets"]["hindsight"] == {
         "api_key": "disposable-test-key"
