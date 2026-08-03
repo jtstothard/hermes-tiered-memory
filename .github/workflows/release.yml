@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build distribution artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Create SHA256 checksums
+        run: sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS
+
+      - name: Upload distributions and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+  publish:
+    name: Publish to PyPI with trusted publishing
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hermes-tiered-memory
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download distributions and checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist
+
+      - name: Attach release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS

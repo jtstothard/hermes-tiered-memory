@@ -54,9 +54,7 @@ def composite_provider(temp_hermes_home):
     provider.l1_adapter = MockL1Adapter()
     provider.l2_adapter = MockL2Adapter()
 
-    outbox_db_path = (
-        temp_hermes_home / "profiles" / "test-profile" / "tiered-memory" / "outbox.db"
-    )
+    outbox_db_path = temp_hermes_home / "profiles" / "test-profile" / "tiered-memory" / "outbox.db"
     outbox_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     from hermes_tiered_memory.outbox.store import OutboxStore
@@ -120,7 +118,7 @@ class TestContract02ReadWriteRoutingPolicy:
 
     def test_write_through_l1_sync(self, composite_provider):
         """Contract: New write commits to L1 synchronously."""
-        result = composite_provider.memory_store("Test content", {})
+        composite_provider.memory_store("Test content", {})
 
         # Verify L1 has it
         l1_results = composite_provider.l1_adapter.recall("Test content", limit=10)
@@ -129,7 +127,7 @@ class TestContract02ReadWriteRoutingPolicy:
     def test_l2_promotion_async(self, composite_provider):
         """Contract: L2 promotion is asynchronous."""
         # Store a memory
-        result = composite_provider.memory_store("Async test", {})
+        composite_provider.memory_store("Async test", {})
 
         # Check outbox - should be pending
         stats = composite_provider.outbox_store.get_stats()
@@ -196,7 +194,7 @@ class TestContract06FailureRecoveryObservability:
         """Contract: L1 write survives L2 timeout."""
         # This would require simulating L2 timeout
         # For now, verify L1 is durable
-        result = composite_provider.memory_store("Survival test", {})
+        composite_provider.memory_store("Survival test", {})
 
         # L1 should have it regardless of L2
         l1_results = composite_provider.l1_adapter.recall("Survival test", limit=10)
@@ -254,7 +252,7 @@ class TestOutboxCrashRecoveryContract:
     def test_atomic_l1_outbox_commit(self, composite_provider):
         """Contract: Atomic L1+outbox commit."""
         # Store a memory
-        result = composite_provider.memory_store("Atomic test", {})
+        composite_provider.memory_store("Atomic test", {})
 
         # Both L1 and outbox should have it
         l1_results = composite_provider.l1_adapter.recall("Atomic test", limit=10)

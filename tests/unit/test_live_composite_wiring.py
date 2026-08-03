@@ -43,7 +43,9 @@ def _write_signed_config(directory: Path, ca_file: str | None = None) -> tuple[P
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     config_path.write_bytes(canonical)
     signature_path.write_bytes(
-        hmac.new(secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + canonical, hashlib.sha256).digest()
+        hmac.new(
+            secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + canonical, hashlib.sha256
+        ).digest()
     )
     config_path.chmod(0o600)
     signature_path.chmod(0o600)
@@ -61,7 +63,9 @@ def disposable_mnemosyne(monkeypatch):
 
         def remember_batch(self, items):
             return [
-                self.memory.remember(item["content"], source=item["source"], metadata=item["metadata"])
+                self.memory.remember(
+                    item["content"], source=item["source"], metadata=item["metadata"]
+                )
                 for item in items
             ]
 
@@ -77,13 +81,17 @@ def disposable_mnemosyne(monkeypatch):
             return "disposable-source"
 
         def get(self, source_id):
-            return None if source_id != "disposable-source" else {
-                "id": source_id,
-                "content": "disposable content",
-                "metadata": {},
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "timestamp": "2026-01-01T00:00:00+00:00",
-            }
+            return (
+                None
+                if source_id != "disposable-source"
+                else {
+                    "id": source_id,
+                    "content": "disposable content",
+                    "metadata": {},
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                }
+            )
 
         def forget(self, source_id):
             return source_id == "disposable-source"
@@ -171,7 +179,7 @@ def test_initialize_forwards_protected_ca_to_owned_l2_client(
             "protected_config": {
                 "path": str(config_path),
                 "signature": {"path": str(signature_path)},
-            }
+            },
         },
     }
     created: dict[str, object] = {}
@@ -185,7 +193,10 @@ def test_initialize_forwards_protected_ca_to_owned_l2_client(
             pass
 
     monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient)
-    monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.ssl.create_default_context", lambda *, cafile: tls_context)
+    monkeypatch.setattr(
+        "hermes_tiered_memory.adapters.hindsight_l2.ssl.create_default_context",
+        lambda *, cafile: tls_context,
+    )
     provider = CompositeProvider(session=SimpleNamespace(config=config))
 
     try:
@@ -224,7 +235,7 @@ def test_initialize_fails_closed_without_valid_profile_hindsight_key(
                     "protected_config": {
                         "path": str(config_path),
                         "signature": {"path": str(signature_path)},
-                    }
+                    },
                 },
             }
         )
@@ -267,11 +278,8 @@ def test_initialize_rejects_configless_hermes_lifecycle_before_adapter_side_effe
 # ---------------------------------------------------------------------------
 
 
-def _ed25519_signed_config(
-    directory: Path, key_id: str, private_key
-) -> tuple[Path, Path, bytes]:
+def _ed25519_signed_config(directory: Path, key_id: str, private_key) -> tuple[Path, Path, bytes]:
     """Write a canonical config + Ed25519 signature; return (config, sig, public_bytes)."""
-    import cryptography.hazmat.primitives.asymmetric.ed25519 as ed25519
     import cryptography.hazmat.primitives.serialization as ser
 
     public_bytes = private_key.public_key().public_bytes(
@@ -305,11 +313,10 @@ def _ed25519_signed_config(
     return config_path, signature_path, public_bytes
 
 
-def test_initialize_loads_signed_config_via_verification_keys_block(
-    tmp_path, disposable_mnemosyne
-):
+def test_initialize_loads_signed_config_via_verification_keys_block(tmp_path, disposable_mnemosyne):
     """A signed Ed25519 config loads using ONLY tiered.verification_keys (no register_key)."""
     import base64
+
     import cryptography.hazmat.primitives.asymmetric.ed25519 as ed25519
 
     ProtectedConfigLoader.clear_keys()
@@ -364,9 +371,7 @@ def test_initialize_fails_closed_without_verification_keys(tmp_path, disposable_
 
     ProtectedConfigLoader.clear_keys()
     private_key = ed25519.Ed25519PrivateKey.generate()
-    config_path, signature_path, _ = _ed25519_signed_config(
-        tmp_path, "prod-ed25519-1", private_key
-    )
+    config_path, signature_path, _ = _ed25519_signed_config(tmp_path, "prod-ed25519-1", private_key)
 
     config = {
         "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "test-key"}}}},
@@ -445,9 +450,7 @@ def test_auth_mode_api_key_passes_real_key_to_l2_adapter(
         def close(self):
             pass
 
-    monkeypatch.setattr(
-        "hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient
-    )
+    monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient)
     api_key = "real-cloud-key"
     config = {
         "profiles": {"profile": {"secrets": {"hindsight": {"api_key": api_key}}}},
@@ -474,9 +477,7 @@ def test_auth_mode_api_key_passes_real_key_to_l2_adapter(
         provider.close()
 
 
-def test_auth_mode_none_passes_no_key_to_l2_adapter(
-    tmp_path, disposable_mnemosyne, monkeypatch
-):
+def test_auth_mode_none_passes_no_key_to_l2_adapter(tmp_path, disposable_mnemosyne, monkeypatch):
     """auth_mode=none initializes the L2 adapter with api_key=None (no Authorization header)."""
     captured_headers: dict[str, object] = {}
     config_path, signature_path = _write_signed_config(tmp_path)
@@ -488,9 +489,7 @@ def test_auth_mode_none_passes_no_key_to_l2_adapter(
         def close(self):
             pass
 
-    monkeypatch.setattr(
-        "hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient
-    )
+    monkeypatch.setattr("hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient)
     config = {
         "profiles": {"profile": {}},
         "tiered": {
@@ -517,9 +516,7 @@ def test_auth_mode_none_passes_no_key_to_l2_adapter(
         provider.close()
 
 
-def test_auth_mode_api_key_without_key_fails_closed(
-    tmp_path, disposable_mnemosyne
-):
+def test_auth_mode_api_key_without_key_fails_closed(tmp_path, disposable_mnemosyne):
     """auth_mode=api_key but no key in profile secrets => RuntimeError at startup."""
     config_path, signature_path = _write_signed_config(tmp_path)
     config = {
@@ -544,9 +541,7 @@ def test_auth_mode_api_key_without_key_fails_closed(
     assert provider.l2_adapter is None
 
 
-def test_auth_mode_none_with_key_present_fails_closed(
-    tmp_path, disposable_mnemosyne
-):
+def test_auth_mode_none_with_key_present_fails_closed(tmp_path, disposable_mnemosyne):
     """auth_mode=none but a key IS present => RuntimeError (misconfiguration signal)."""
     config_path, signature_path = _write_signed_config(tmp_path)
     config = {

@@ -28,7 +28,9 @@ def test_registration_rejects_current_non_memory_provider(monkeypatch):
     class MemoryProvider:
         pass
 
-    monkeypatch.setitem(sys.modules, "agent.memory_provider", SimpleNamespace(MemoryProvider=MemoryProvider))
+    monkeypatch.setitem(
+        sys.modules, "agent.memory_provider", SimpleNamespace(MemoryProvider=MemoryProvider)
+    )
     context = Mock()
 
     with pytest.raises(RuntimeError, match="does not implement"):
@@ -41,7 +43,10 @@ def test_registration_fails_closed_when_hermes_api_is_unavailable(monkeypatch):
     monkeypatch.delitem(sys.modules, "agent.memory_provider", raising=False)
     context = Mock()
 
-    with pytest.raises(RuntimeError, match="API is unavailable|does not implement the pinned Hermes MemoryProvider API"):
+    with pytest.raises(
+        RuntimeError,
+        match="API is unavailable|does not implement the pinned Hermes MemoryProvider API",
+    ):
         package.register(context)
 
     context.register_memory_provider.assert_not_called()
@@ -98,8 +103,8 @@ def test_startup_rejects_malformed_config(tmp_path):
 
 
 def test_loader_accepts_same_sequence_identical_payload(tmp_path):
-    from tests.unit.test_config import _config, _write_signed_config
     from hermes_tiered_memory.config import ProtectedConfigLoader
+    from tests.unit.test_config import _config, _write_signed_config
 
     path, signature_path = _write_signed_config(tmp_path, _config())
     loader = ProtectedConfigLoader(path, signature_path)

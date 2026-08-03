@@ -26,7 +26,9 @@ def _write_signed_config(directory, data):
     secret = b"test-secret"
     ProtectedConfigLoader.register_key("test-key", secret)
     path = Path(directory) / "config.json"
-    path.write_bytes(json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    path.write_bytes(
+        json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    )
     path.chmod(0o600)
     payload = json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature_path = Path(directory) / "config.sig"
@@ -181,7 +183,9 @@ def test_noncanonical_json_is_rejected(tmp_path):
     path.chmod(0o600)
     payload = path.read_bytes()
     signature = tmp_path / "config.sig"
-    signature.write_bytes(hmac.new(secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest())
+    signature.write_bytes(
+        hmac.new(secret, ProtectedConfigLoader.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest()
+    )
     signature.chmod(0o600)
     with pytest.raises(ProtectedConfigValidationError, match="canonical"):
         ProtectedConfigLoader(path, signature).load()
@@ -211,7 +215,9 @@ def test_protected_paths_reject_symlinks(tmp_path, path_kind):
         "replay": (config, signature),
     }
     with pytest.raises(ProtectedConfigValidationError, match="symlink"):
-        ProtectedConfigLoader(*paths[path_kind], replay_state_path=link if path_kind == "replay" else None).load()
+        ProtectedConfigLoader(
+            *paths[path_kind], replay_state_path=link if path_kind == "replay" else None
+        ).load()
 
 
 @pytest.mark.parametrize("field", ["sequence", "port"])

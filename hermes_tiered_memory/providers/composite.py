@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -27,7 +28,7 @@ def _load_tiered_runtime_config() -> dict[str, Any] | None:
     internal ``tiered`` key.
     """
     try:
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config import load_config_readonly  # type: ignore[import-untyped]
 
         config = load_config_readonly()
     except Exception:
@@ -49,9 +50,10 @@ def _load_tiered_runtime_config() -> dict[str, Any] | None:
 try:
     # The real plugin process imports Hermes' pinned public ABC.  The fallback
     # only lets this library's standalone tests run without Hermes installed.
-    from agent.memory_provider import MemoryProvider
+    from agent.memory_provider import MemoryProvider  # type: ignore[import-untyped]
 except ModuleNotFoundError:  # pragma: no cover - standalone test environment
-    class MemoryProvider(ABC):
+
+    class MemoryProvider(ABC):  # type: ignore[no-redef]
         @property
         @abstractmethod
         def name(self) -> str:
@@ -149,10 +151,9 @@ class CompositeProvider(MemoryProvider):
         if self._disabled:
             return False
         try:
-            from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
-            from hermes_tiered_memory.adapters.mnemosyne_l1 import MnemosyneL1Adapter
-
-            return bool(HindsightL2Adapter and MnemosyneL1Adapter)
+            importlib.import_module("hermes_tiered_memory.adapters.hindsight_l2")
+            importlib.import_module("hermes_tiered_memory.adapters.mnemosyne_l1")
+            return True
         except (ImportError, ModuleNotFoundError):
             return False
 
@@ -171,11 +172,10 @@ class CompositeProvider(MemoryProvider):
                     for tool_name, provider in tuple(routes.items()):
                         if provider is self:
                             del routes[tool_name]
-                    setattr(
-                        manager,
-                        "_has_external",
-                        any(provider.name != "builtin" for provider in providers),
-                    )
+                    if manager is not None:
+                        manager._has_external = any(
+                            provider.name != "builtin" for provider in providers
+                        )
                     break
                 frame = frame.f_back
         finally:
@@ -188,7 +188,9 @@ class CompositeProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Initialize the live, profile-scoped composite for one Hermes session."""
         if self._disabled:
-            raise RuntimeError("Tiered provider is disabled after a previous initialization failure")
+            raise RuntimeError(
+                "Tiered provider is disabled after a previous initialization failure"
+            )
         hermes_home = kwargs.get("hermes_home")
         profile = kwargs.get("agent_identity")
         if not isinstance(hermes_home, str) or not hermes_home:
@@ -196,7 +198,9 @@ class CompositeProvider(MemoryProvider):
             raise RuntimeError("Hermes hermes_home is required; composite provider startup aborted")
         if not isinstance(profile, str) or not profile:
             self._disable()
-            raise RuntimeError("Hermes agent_identity is required; composite provider startup aborted")
+            raise RuntimeError(
+                "Hermes agent_identity is required; composite provider startup aborted"
+            )
         if not isinstance(session_id, str) or not session_id:
             self._disable()
             raise RuntimeError("Hermes session_id is required; composite provider startup aborted")
@@ -238,7 +242,9 @@ class CompositeProvider(MemoryProvider):
             self.initialize_all()
         except Exception as exc:
             self._disable()
-            raise RuntimeError("Tiered live adapters could not initialize; startup aborted") from exc
+            raise RuntimeError(
+                "Tiered live adapters could not initialize; startup aborted"
+            ) from exc
         self._initialized = True
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
@@ -285,9 +291,16 @@ class CompositeProvider(MemoryProvider):
             raise ValueError("memory tool arguments must be an object")
         if tool_name == "tiered_memory_search":
             query, limit = args.get("query"), args.get("limit", 10)
-            if not isinstance(query, str) or not query or isinstance(limit, bool) or not isinstance(limit, int):
+            if (
+                not isinstance(query, str)
+                or not query
+                or isinstance(limit, bool)
+                or not isinstance(limit, int)
+            ):
                 raise ValueError("tiered_memory_search requires string query and integer limit")
-            return json.dumps(self.memory_search(query, limit=max(1, min(limit, 100))), sort_keys=True)
+            return json.dumps(
+                self.memory_search(query, limit=max(1, min(limit, 100))), sort_keys=True
+            )
         if tool_name == "tiered_memory_store":
             content, metadata = args.get("content"), args.get("metadata", {})
             if not isinstance(content, str) or not content or not isinstance(metadata, dict):
@@ -403,19 +416,13 @@ class CompositeProvider(MemoryProvider):
 
         raw = tiered_config.get("verification_keys", [])
         if raw is None:
-            raise RuntimeError(
-                "tiered.verification_keys must be a list of key entries, not null"
-            )
+            raise RuntimeError("tiered.verification_keys must be a list of key entries, not null")
         if not isinstance(raw, list):
-            raise RuntimeError(
-                "tiered.verification_keys must be a list of key entries"
-            )
+            raise RuntimeError("tiered.verification_keys must be a list of key entries")
         try:
             ProtectedConfigLoader.register_verification_keys(raw)
         except ProtectedConfigValidationError as e:
-            raise RuntimeError(
-                f"tiered.verification_keys is invalid: {e}"
-            ) from e
+            raise RuntimeError(f"tiered.verification_keys is invalid: {e}") from e
 
     def _initialize_l1(self) -> None:
         """Initialize the L1 (Mnemosyne) adapter."""
@@ -545,7 +552,9 @@ class CompositeProvider(MemoryProvider):
         from hermes_tiered_memory.outbox.store import OutboxStore
 
         # Outbox lives in the profile's data directory
-        profile_data_dir = self.hermes_home / "profiles" / self.active_profile_identity / "tiered-memory"
+        profile_data_dir = (
+            self.hermes_home / "profiles" / self.active_profile_identity / "tiered-memory"
+        )
         outbox_db_path = profile_data_dir / "outbox.db"
 
         self.outbox_store = OutboxStore(outbox_db_path)
@@ -576,7 +585,10 @@ class CompositeProvider(MemoryProvider):
             or max_attempts < 1
             or not isinstance(retry_delays, list)
             or not retry_delays
-            or any(isinstance(delay, bool) or not isinstance(delay, int) or delay < 0 for delay in retry_delays)
+            or any(
+                isinstance(delay, bool) or not isinstance(delay, int) or delay < 0
+                for delay in retry_delays
+            )
             or isinstance(lease_duration_seconds, bool)
             or not isinstance(lease_duration_seconds, int)
             or lease_duration_seconds < 1
@@ -587,6 +599,7 @@ class CompositeProvider(MemoryProvider):
         # process's leased rows are returned to pending so the fresh worker
         # re-processes them.
         import uuid
+
         recovery_owner = f"recovery-{uuid.uuid4().hex[:12]}"
         recovered = self.outbox_store.recover_in_flight(recovery_owner)
         self.last_recovery_count = recovered
@@ -663,14 +676,17 @@ class CompositeProvider(MemoryProvider):
         # Concrete SQLite L1 uses the shared ATTACH transaction. Other adapters
         # retain their isolated injection behavior and are not advertised atomic.
         from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+
         if isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
             if not self.l1_adapter.supports_atomic_outbox:
                 self.l1_adapter.configure_atomic_outbox(self.outbox_store)
             try:
                 l1_record = self.l1_adapter.remember_with_outbox(
-                    content, metadata, document_id_factory=self._generate_document_id,
+                    content,
+                    metadata,
+                    document_id_factory=self._generate_document_id,
                     promotion_metadata_factory=self._build_promotion_metadata,
-                    outbox_store=self.outbox_store
+                    outbox_store=self.outbox_store,
                 )
             except Exception as e:
                 logger.exception(f"Atomic L1/outbox write error: {e}")
@@ -686,7 +702,7 @@ class CompositeProvider(MemoryProvider):
             )
         except Exception as e:
             logger.exception(f"L1 write error: {e}")
-            raise RuntimeError(f"L1 write failed: {e}")
+            raise RuntimeError(f"L1 write failed: {e}") from e
 
         # Enqueue L2 promotion (asynchronous)
         if self.outbox_store:
@@ -726,18 +742,18 @@ class CompositeProvider(MemoryProvider):
         # Concrete SQLite L1 uses the shared ATTACH transaction. Other adapters
         # retain their isolated injection behavior and are not advertised atomic.
         from hermes_tiered_memory.adapters.sqlite_l1 import SQLiteL1Adapter
+
         if isinstance(self.l1_adapter, SQLiteL1Adapter) and self.outbox_store:
             if not self.l1_adapter.supports_atomic_outbox:
                 self.l1_adapter.configure_atomic_outbox(self.outbox_store)
             try:
                 new_revision = self.l1_adapter.forget_with_outbox(
-                    memory_id, document_id_factory=self._generate_document_id,
+                    memory_id,
+                    document_id_factory=self._generate_document_id,
                     delete_metadata_factory=self._build_delete_metadata,
-                    outbox_store=self.outbox_store
+                    outbox_store=self.outbox_store,
                 )
-                logger.info(
-                    f"Atomic L1 delete: source_id={memory_id}, new_revision={new_revision}"
-                )
+                logger.info(f"Atomic L1 delete: source_id={memory_id}, new_revision={new_revision}")
                 return new_revision is not None
             except Exception as e:
                 logger.exception(f"Atomic L1/outbox delete error: {e}")
@@ -755,7 +771,9 @@ class CompositeProvider(MemoryProvider):
         if deleted and self.outbox_store:
             try:
                 document_id = self._generate_document_id(memory_id)
-                delete_metadata = self._build_delete_metadata(memory_id, self.l1_adapter.get_revision(memory_id) or 0)
+                delete_metadata = self._build_delete_metadata(
+                    memory_id, self.l1_adapter.get_revision(memory_id) or 0
+                )
 
                 self.outbox_store.enqueue(
                     document_id=document_id,
@@ -765,12 +783,13 @@ class CompositeProvider(MemoryProvider):
                     metadata=delete_metadata,
                 )
                 logger.info(
-                    f"L2 delete enqueued: document_id={document_id}, "
-                    f"mnemosyne_id={memory_id}"
+                    f"L2 delete enqueued: document_id={document_id}, " f"mnemosyne_id={memory_id}"
                 )
             except Exception as e:
                 logger.exception(f"L2 delete enqueue error: {e}")
-                raise RuntimeError("L1 tombstone succeeded but durable L2 delete enqueue failed") from e
+                raise RuntimeError(
+                    "L1 tombstone succeeded but durable L2 delete enqueue failed"
+                ) from e
 
         return deleted
 
@@ -859,7 +878,7 @@ class CompositeProvider(MemoryProvider):
         ).hexdigest()
         return f"mnemosyne-{digest[:32]}"
 
-    def _build_promotion_metadata(self, l1_record) -> dict[str, Any]:
+    def _build_promotion_metadata(self, l1_record: Any) -> dict[str, Any]:
         """Build the metadata envelope for L2 promotion."""
         return {
             "origin": "mnemosyne",
@@ -873,7 +892,7 @@ class CompositeProvider(MemoryProvider):
             **l1_record.metadata,
         }
 
-    def _l1_record_to_dict(self, record) -> dict[str, Any]:
+    def _l1_record_to_dict(self, record: Any) -> dict[str, Any]:
         """Convert an L1Record to a dictionary."""
         return {
             "id": record.source_id,
@@ -886,7 +905,7 @@ class CompositeProvider(MemoryProvider):
             "source": "l1",
         }
 
-    def _l2_document_to_dict(self, document) -> dict[str, Any]:
+    def _l2_document_to_dict(self, document: Any) -> dict[str, Any]:
         """Convert an L2Document to a dictionary."""
         return {
             "id": document.document_id,
@@ -897,7 +916,7 @@ class CompositeProvider(MemoryProvider):
             "source": "l2",
         }
 
-    def _backfill_l1(self, l2_results) -> None:
+    def _backfill_l1(self, l2_results: Any) -> None:
         """Backfill L1 with L2 results."""
         if not self.l1_adapter:
             return
@@ -918,7 +937,7 @@ class CompositeProvider(MemoryProvider):
             except Exception as e:
                 logger.exception(f"Error backfilling L1 with document {doc.document_id}: {e}")
 
-    def inject_memory_provider_tools(self, agent):
+    def inject_memory_provider_tools(self, agent: Any) -> None:
         """Inject memory tools into the agent."""
         # Register the memory tools
         agent.add_tool(

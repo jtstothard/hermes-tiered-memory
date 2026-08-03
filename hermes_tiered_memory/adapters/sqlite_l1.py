@@ -12,17 +12,18 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hermes_tiered_memory.outbox.store import OutboxStore
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from hermes_tiered_memory.adapters.l1 import L1Adapter, L1Record
-
 
 _SCHEMA_VERSION = 1
 _SCHEMA_COLUMNS = (
@@ -73,7 +74,7 @@ class SQLiteL1Adapter(L1Adapter):
         self._attached_outbox_schema: str | None = None
         self._initialize_schema()
 
-    def configure_atomic_outbox(self, outbox_store: "OutboxStore") -> None:
+    def configure_atomic_outbox(self, outbox_store: OutboxStore) -> None:
         """Attach the outbox DB using rollback journals for atomic commits."""
         with self._lock:
             self._ensure_open()
@@ -81,7 +82,9 @@ class SQLiteL1Adapter(L1Adapter):
                 raise RuntimeError("atomic outbox is already configured")
             attached = False
             try:
-                self._connection.execute("ATTACH DATABASE ? AS outbox", (str(outbox_store.db_path),))
+                self._connection.execute(
+                    "ATTACH DATABASE ? AS outbox", (str(outbox_store.db_path),)
+                )
                 attached = True
                 outbox_store.prepare_for_atomic_attach(self._connection, "outbox")
                 outbox_store.initialize_schema_on(self._connection, "outbox")
@@ -90,20 +93,23 @@ class SQLiteL1Adapter(L1Adapter):
             except BaseException:
                 self._rollback()
                 if attached:
-                    try:
+                    with suppress(sqlite3.DatabaseError):
                         self._connection.execute("DETACH DATABASE outbox")
-                    except sqlite3.DatabaseError:
-                        pass
                 raise
 
     @property
     def supports_atomic_outbox(self) -> bool:
         return self._attached_outbox_schema is not None
 
-    def remember_with_outbox(self, content: str, metadata: dict[str, Any], *,
-                             document_id_factory: Callable[[str], str],
-                             promotion_metadata_factory: Callable[[L1Record], dict[str, Any]],
-                             outbox_store: "OutboxStore") -> L1Record:
+    def remember_with_outbox(
+        self,
+        content: str,
+        metadata: dict[str, Any],
+        *,
+        document_id_factory: Callable[[str], str],
+        promotion_metadata_factory: Callable[[L1Record], dict[str, Any]],
+        outbox_store: OutboxStore,
+    ) -> L1Record:
         """Store L1 and its promotion row in one ATTACH transaction.
 
         The provider supplies the promotion envelope through a callback; this
@@ -113,33 +119,45 @@ class SQLiteL1Adapter(L1Adapter):
         if not self.supports_atomic_outbox:
             raise RuntimeError("SQLite L1 adapter has no configured atomic outbox")
         source_id = f"sqlite-l1-{uuid.uuid4().hex}"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.transaction() as connection:
             metadata_json = json.dumps(metadata, separators=(",", ":"))
             connection.execute(
-                "INSERT INTO l1_records (source_id, revision, content, metadata, created_at, updated_at, is_deleted) "
+                "INSERT INTO l1_records (source_id, revision, content, metadata, "
+                "created_at, updated_at, is_deleted) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (source_id, 1, content, metadata_json, now.isoformat(), now.isoformat(), 0),
             )
             record = L1Record(source_id, 1, content, metadata, now, now, False)
-            outbox_store.enqueue_on(connection, schema="outbox", document_id=document_id_factory(source_id),
-                                    mnemosyne_id=source_id, mnemosyne_rev=1,
-                                    content=content, metadata=promotion_metadata_factory(record))
+            outbox_store.enqueue_on(
+                connection,
+                schema="outbox",
+                document_id=document_id_factory(source_id),
+                mnemosyne_id=source_id,
+                mnemosyne_rev=1,
+                content=content,
+                metadata=promotion_metadata_factory(record),
+            )
         return record
 
-    def forget_with_outbox(self, source_id: str, *,
-                           document_id_factory: Callable[[str], str],
-                           delete_metadata_factory: Callable[[str, int], dict[str, Any]],
-                           outbox_store: "OutboxStore") -> int | None:
+    def forget_with_outbox(
+        self,
+        source_id: str,
+        *,
+        document_id_factory: Callable[[str], str],
+        delete_metadata_factory: Callable[[str, int], dict[str, Any]],
+        outbox_store: OutboxStore,
+    ) -> int | None:
         """Delete (tombstone) L1 and enqueue delete outbox row in one ATTACH transaction.
 
         Returns the new revision on success, or None if the record was not found or already deleted.
         """
         if not self.supports_atomic_outbox:
             raise RuntimeError("SQLite L1 adapter has no configured atomic outbox")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.transaction() as connection:
-            # UPDATE l1_records SET is_deleted=1, revision=revision+1, updated_at=now WHERE source_id=? AND is_deleted=0
+            # UPDATE l1_records SET is_deleted=1, revision=revision+1,
+            # updated_at=now WHERE source_id=? AND is_deleted=0
             cursor = connection.execute(
                 "UPDATE l1_records SET is_deleted=1, revision=revision+1, updated_at=? "
                 "WHERE source_id=? AND is_deleted=0",
@@ -150,8 +168,7 @@ class SQLiteL1Adapter(L1Adapter):
                 return None
             # Read the new revision from the updated row
             row = connection.execute(
-                "SELECT revision FROM l1_records WHERE source_id=?",
-                (source_id,)
+                "SELECT revision FROM l1_records WHERE source_id=?", (source_id,)
             ).fetchone()
             if row is None:
                 return None
@@ -164,7 +181,7 @@ class SQLiteL1Adapter(L1Adapter):
                 mnemosyne_id=source_id,
                 mnemosyne_rev=new_revision,
                 content="",
-                metadata=delete_metadata_factory(source_id, new_revision)
+                metadata=delete_metadata_factory(source_id, new_revision),
             )
             return new_revision
 
@@ -215,8 +232,7 @@ class SQLiteL1Adapter(L1Adapter):
                 raise RuntimeError(f"unsupported SQLite schema version: {version}")
 
             with self.transaction() as connection:
-                connection.execute(
-                    """
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS l1_records (
                         source_id TEXT PRIMARY KEY,
                         revision INTEGER NOT NULL,
@@ -226,37 +242,47 @@ class SQLiteL1Adapter(L1Adapter):
                         updated_at TEXT NOT NULL,
                         is_deleted INTEGER NOT NULL DEFAULT 0
                     )
-                    """
-                )
+                    """)
                 columns = tuple(
-                    tuple(_row_value(row, key, index) for key, index in (
-                        ("name", 1),
-                        ("type", 2),
-                        ("notnull", 3),
-                        ("dflt_value", 4),
-                        ("pk", 5),
-                    ))
+                    tuple(
+                        _row_value(row, key, index)
+                        for key, index in (
+                            ("name", 1),
+                            ("type", 2),
+                            ("notnull", 3),
+                            ("dflt_value", 4),
+                            ("pk", 5),
+                        )
+                    )
                     for row in connection.execute("PRAGMA table_info(l1_records)").fetchall()
                 )
                 if columns != _SCHEMA_COLUMNS:
-                    raise RuntimeError("unsupported existing l1_records schema: columns do not match")
+                    raise RuntimeError(
+                        "unsupported existing l1_records schema: columns do not match"
+                    )
                 connection.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_l1_records_content "
-                    "ON l1_records(content)"
+                    "CREATE INDEX IF NOT EXISTS idx_l1_records_content " "ON l1_records(content)"
                 )
                 connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
     def remember(self, content: str, metadata: dict[str, Any]) -> L1Record:
         self._validate_metadata(metadata)
         source_id = f"sqlite-l1-{uuid.uuid4().hex}"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self.transaction() as connection:
             connection.execute(
                 "INSERT INTO l1_records "
                 "(source_id, revision, content, metadata, created_at, updated_at, is_deleted) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (source_id, 1, content, json.dumps(metadata, separators=(",", ":")),
-                 now.isoformat(), now.isoformat(), 0),
+                (
+                    source_id,
+                    1,
+                    content,
+                    json.dumps(metadata, separators=(",", ":")),
+                    now.isoformat(),
+                    now.isoformat(),
+                    0,
+                ),
             )
         record = self.get(source_id)
         if record is None:
@@ -264,19 +290,26 @@ class SQLiteL1Adapter(L1Adapter):
         return record
 
     def remember_batch(self, items: list[tuple[str, dict[str, Any]]]) -> list[L1Record]:
-        for content, metadata in items:
+        for _content, metadata in items:
             self._validate_metadata(metadata)
         records: list[L1Record] = []
         with self.transaction() as connection:
             for content, metadata in items:
                 source_id = f"sqlite-l1-{uuid.uuid4().hex}"
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 connection.execute(
                     "INSERT INTO l1_records "
                     "(source_id, revision, content, metadata, created_at, updated_at, is_deleted) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (source_id, 1, content, json.dumps(metadata, separators=(",", ":")),
-                     now.isoformat(), now.isoformat(), 0),
+                    (
+                        source_id,
+                        1,
+                        content,
+                        json.dumps(metadata, separators=(",", ":")),
+                        now.isoformat(),
+                        now.isoformat(),
+                        0,
+                    ),
                 )
                 records.append(L1Record(source_id, 1, content, metadata, now, now, False))
         return records
@@ -287,7 +320,8 @@ class SQLiteL1Adapter(L1Adapter):
             cursor = self._connection.execute(
                 "SELECT source_id, revision, content, metadata, created_at, updated_at, is_deleted "
                 "FROM l1_records WHERE is_deleted = 0 AND content LIKE ? "
-                "ORDER BY updated_at DESC LIMIT ?", (f"%{query}%", limit)
+                "ORDER BY updated_at DESC LIMIT ?",
+                (f"%{query}%", limit),
             )
             return [self._row_to_record(row, cursor.description) for row in cursor.fetchall()]
 
@@ -304,7 +338,7 @@ class SQLiteL1Adapter(L1Adapter):
             cursor = connection.execute(
                 "UPDATE l1_records SET revision = ?, updated_at = ?, is_deleted = 1 "
                 "WHERE source_id = ? AND is_deleted = 0",
-                (revision + 1, datetime.now(timezone.utc).isoformat(), source_id),
+                (revision + 1, datetime.now(UTC).isoformat(), source_id),
             )
             return cursor.rowcount > 0
 
@@ -313,7 +347,8 @@ class SQLiteL1Adapter(L1Adapter):
             self._ensure_open()
             cursor = self._connection.execute(
                 "SELECT source_id, revision, content, metadata, created_at, updated_at, is_deleted "
-                "FROM l1_records WHERE source_id = ? AND is_deleted = 0", (source_id,)
+                "FROM l1_records WHERE source_id = ? AND is_deleted = 0",
+                (source_id,),
             )
             row = cursor.fetchone()
             return self._row_to_record(row, cursor.description) if row is not None else None
@@ -347,20 +382,18 @@ class SQLiteL1Adapter(L1Adapter):
             self._closed = True
 
     def _rollback(self) -> None:
-        try:
+        with suppress(sqlite3.ProgrammingError):
             self._connection.rollback()
-        except sqlite3.ProgrammingError:
-            # The connection can only be externally closed through the exposed
-            # escape hatch; do not mask the transaction's original exception.
-            pass
 
     @staticmethod
     def _row_to_record(row: Any, description: Any) -> L1Record:
         names = [column[0] for column in description]
-        values = row if isinstance(row, Mapping) else dict(zip(names, row))
+        values = row if isinstance(row, Mapping) else dict(zip(names, row, strict=True))
         return L1Record(
-            source_id=values["source_id"], revision=int(values["revision"]),
-            content=values["content"], metadata=json.loads(values["metadata"]),
+            source_id=values["source_id"],
+            revision=int(values["revision"]),
+            content=values["content"],
+            metadata=json.loads(values["metadata"]),
             created_at=datetime.fromisoformat(values["created_at"]),
             updated_at=datetime.fromisoformat(values["updated_at"]),
             is_deleted=bool(values["is_deleted"]),

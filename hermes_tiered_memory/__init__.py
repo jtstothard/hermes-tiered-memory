@@ -10,10 +10,10 @@ __all__ = ["CompositeProvider", "register", "register_memory_provider"]
 __version__ = "1.0.0"
 
 
-def register(ctx):
+def register(ctx: object) -> None:
     """Register exactly one concrete provider or fail before registration."""
     try:
-        from agent.memory_provider import MemoryProvider
+        from agent.memory_provider import MemoryProvider  # type: ignore[import-untyped]
     except (ImportError, ModuleNotFoundError) as exc:
         raise RuntimeError(
             "Hermes MemoryProvider API is unavailable; tiered provider was not registered"
@@ -43,6 +43,6 @@ def register(ctx):
     register_provider(provider)
 
 
-def register_memory_provider(ctx):
+def register_memory_provider(ctx: object) -> None:
     """Backward-compatible alias for the plugin loader entrypoint."""
     return register(ctx)

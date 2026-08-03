@@ -1,14 +1,13 @@
 """Unit tests for the outbox store."""
 
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from hermes_tiered_memory.outbox.store import (
-    OutboxItem,
     OutboxState,
     OutboxStore,
     TerminalOutcome,
@@ -40,9 +39,7 @@ class TestOutboxStoreBasics:
 
         # Check tables exist
         conn = store._get_connection()
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='outbox'"
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='outbox'")
         result = cursor.fetchone()
         assert result is not None
 
@@ -119,7 +116,7 @@ class TestOutboxStoreBasics:
         )
 
         # Attempt to enqueue same logical item
-        with pytest.raises(Exception):  # SQLite IntegrityError
+        with pytest.raises(sqlite3.IntegrityError):
             outbox_store.enqueue(
                 document_id="doc-1",
                 mnemosyne_id="mne-1",

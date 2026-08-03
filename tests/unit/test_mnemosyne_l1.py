@@ -21,7 +21,9 @@ def fake_mnemosyne(monkeypatch):
 
         def remember_batch(self, items):
             return [
-                self.memory.remember(item["content"], source=item["source"], metadata=item["metadata"])
+                self.memory.remember(
+                    item["content"], source=item["source"], metadata=item["metadata"]
+                )
                 for item in items
             ]
 
@@ -58,7 +60,7 @@ def fake_mnemosyne(monkeypatch):
     mnemosyne = ModuleType("mnemosyne")
     core = ModuleType("mnemosyne.core")
     memory = ModuleType("mnemosyne.core.memory")
-    setattr(memory, "Mnemosyne", Mnemosyne)
+    memory.Mnemosyne = Mnemosyne
     monkeypatch.setitem(sys.modules, "mnemosyne", mnemosyne)
     monkeypatch.setitem(sys.modules, "mnemosyne.core", core)
     monkeypatch.setitem(sys.modules, "mnemosyne.core.memory", memory)
@@ -107,8 +109,7 @@ def test_legacy_unscoped_ledger_rows_are_migrated_fail_closed(tmp_path, fake_mne
     ledger_path = tmp_path / "banks" / "shared-bank" / "tiered-memory-l1-ledger.sqlite"
     ledger_path.parent.mkdir(parents=True)
     ledger = sqlite3.connect(ledger_path)
-    ledger.execute(
-        """CREATE TABLE records (
+    ledger.execute("""CREATE TABLE records (
             source_id TEXT PRIMARY KEY,
             revision INTEGER NOT NULL,
             content TEXT NOT NULL,
@@ -116,8 +117,7 @@ def test_legacy_unscoped_ledger_rows_are_migrated_fail_closed(tmp_path, fake_mne
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             is_deleted INTEGER NOT NULL
-        )"""
-    )
+        )""")
     ledger.execute(
         "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
