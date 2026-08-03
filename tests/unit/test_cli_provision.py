@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import stat
 from pathlib import Path
-
-import base64
 
 from cryptography.hazmat.primitives import serialization
 
@@ -15,25 +14,28 @@ from hermes_tiered_memory.config import ProtectedConfigLoader
 def test_provision_round_trips_signed_config_and_writes_reviewable_patch(tmp_path: Path) -> None:
     output = tmp_path / "provisioned"
 
-    assert main(
-        [
-            "provision",
-            "--output-dir",
-            str(output),
-            "--key-id",
-            "release-key",
-            "--config-id",
-            "release-config",
-            "--host",
-            "hindsight.example.test",
-            "--auth-mode",
-            "none",
-            "--not-before",
-            "2026-01-01T00:00:00Z",
-            "--expires-at",
-            "2099-01-01T00:00:00Z",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "provision",
+                "--output-dir",
+                str(output),
+                "--key-id",
+                "release-key",
+                "--config-id",
+                "release-config",
+                "--host",
+                "hindsight.example.test",
+                "--auth-mode",
+                "none",
+                "--not-before",
+                "2026-01-01T00:00:00Z",
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+            ]
+        )
+        == 0
+    )
 
     private_key = output / "release-key.private.pem"
     config_path = output / "protected-config.json"
@@ -70,26 +72,29 @@ def test_provision_api_key_mode_only_emits_mode_and_does_not_read_environment(
     monkeypatch.setenv("HINDSIGHT_API_KEY", "must-not-be-read")
     output = tmp_path / "out"
 
-    assert main(
-        [
-            "provision",
-            "--output-dir",
-            str(output),
-            "--key-id",
-            "k",
-            "--config-id",
-            "c",
-            "--host",
-            "h.example.test",
-            "--auth-mode",
-            "api_key",
-            "--not-before",
-            "2026-01-01T00:00:00Z",
-            "--expires-at",
-            "2099-01-01T00:00:00Z",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "provision",
+                "--output-dir",
+                str(output),
+                "--key-id",
+                "k",
+                "--config-id",
+                "c",
+                "--host",
+                "h.example.test",
+                "--auth-mode",
+                "api_key",
+                "--not-before",
+                "2026-01-01T00:00:00Z",
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+            ]
+        )
+        == 0
+    )
     patch = (output / "memory.tiered.patch.yaml").read_text()
-    assert "auth_mode: \"api_key\"" in patch
+    assert 'auth_mode: "api_key"' in patch
     assert "HINDSIGHT_API_KEY" not in patch
     assert "secret" not in patch.lower()
