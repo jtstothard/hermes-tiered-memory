@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 
 from hermes_tiered_memory.config import ProtectedConfigLoader
-from scripts.generate_protected_config import (
+from hermes_tiered_memory.provisioning import (
     _parse_rfc3339,
     _write_file_strict,
     build_signed_config,
