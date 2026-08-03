@@ -7,7 +7,7 @@ adapters are internal implementation details and never register separately.
 from hermes_tiered_memory.providers.composite import CompositeProvider
 
 __all__ = ["CompositeProvider", "register", "register_memory_provider"]
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 
 def register(ctx):

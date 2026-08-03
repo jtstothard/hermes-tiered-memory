@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-tiered-memory"
-version = "0.1.0"
-description = "Fail-closed composite-provider prototype for a future Hermes integration"
+version = "1.0.0"
+description = "Fail-closed composite memory provider: hot L1 (Mnemosyne/SQLite) + warm L2 (Hindsight) for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = {text = "MIT"}
@@ -13,7 +13,7 @@ authors = [
     {name = "Jay Stothard", email = "jtstothard@gmail.com"},
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -22,6 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
+    "hermes-agent>=0.7.0",
     "cryptography>=41.0.0",
     "httpx>=0.25.0",
 ]
@@ -47,6 +48,9 @@ dev = [
     "ruff>=0.1.0",
     "black>=23.7.0",
 ]
+
+[project.scripts]
+hermes-tiered-memory = "hermes_tiered_memory.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/jtstothard/hermes-tiered-memory"
