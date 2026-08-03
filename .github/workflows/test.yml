@@ -19,8 +19,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install declared test dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e '.[test]'
+      - name: Install declared development dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+      - name: Run Ruff
+        run: ruff check hermes_tiered_memory tests
+      - name: Run mypy
+        run: mypy hermes_tiered_memory
+      - name: Check Black formatting
+        run: black --check hermes_tiered_memory tests
       - name: Run full baseline suite
         run: python -m pytest -q
 
@@ -67,15 +73,18 @@ jobs:
 
       - name: Install plugin into temp HERMES_HOME
         run: |
+          WHEEL=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          test -n "$WHEEL"
           TMP_HOME=$(mktemp -d)
-          scripts/install_plugin.sh dist/hermes_tiered_memory-0.1.0-py3-none-any.whl "$TMP_HOME"
+          scripts/install_plugin.sh "$WHEEL" "$TMP_HOME"
           echo "HERMES_HOME=$TMP_HOME" >> "$GITHUB_ENV"
+          echo "WHEEL_PATH=$WHEEL" >> "$GITHUB_ENV"
 
       - name: Assert wheel has no secrets or local DBs
         run: |
           python - << 'PY'
-          import zipfile, sys
-          wheel = "dist/hermes_tiered_memory-0.1.0-py3-none-any.whl"
+          import zipfile, sys, os
+          wheel = os.environ["WHEEL_PATH"]
           forbidden = (".env", ".sqlite", ".db", ".key", ".pem", "secret", "credential")
           with zipfile.ZipFile(wheel) as zf:
               names = zf.namelist()
@@ -129,3 +138,16 @@ jobs:
 
           print("\nAll discovery gates passed.")
           PY
+
+  gitleaks:
+    name: Gitleaks full-history scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

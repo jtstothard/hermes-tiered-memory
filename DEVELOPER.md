@@ -96,7 +96,9 @@ python -m pytest tests/contract -v       # contract tests only
 python -m pytest tests/unit/test_outbox_store.py::TestOutboxStoreBasics::test_initialization_creates_schema -v
 ```
 
-CI (`.github/workflows/test.yml`) runs `python -m pytest -q` after `pip install -e '.[test]'` across Python 3.11–3.13.
+CI (`.github/workflows/test.yml`) runs Ruff, mypy, Black's formatting check, and `python -m pytest -q` across Python 3.11–3.13. The loader-discovery job separately proves installation through the pinned real Hermes loader and rejects secrets or local databases in the wheel. Pull requests and pushes also run a full-history Gitleaks scan.
+
+The release workflow (`.github/workflows/release.yml`) publishes `v*` tags to PyPI through trusted publishing (OIDC; no PyPI token) and attaches distributions plus `SHA256SUMS` to the GitHub Release. Live end-to-end topology tests remain operator-only.
 
 ## Code Quality
 
@@ -115,7 +117,7 @@ mypy hermes_tiered_memory
 ### Format
 
 ```bash
-black hermes_tiered_memory tests/
+black --check hermes_tiered_memory tests
 ```
 
 ## Adding a New Feature
