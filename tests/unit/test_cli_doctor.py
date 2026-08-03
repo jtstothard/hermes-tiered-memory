@@ -6,7 +6,9 @@ from hermes_tiered_memory.cli import main
 from scripts.generate_protected_config import build_signed_config, generate_ed25519_keypair
 
 
-def _signed_files(tmp_path: Path, *, expires_at: str = "2099-01-01T00:00:00Z") -> tuple[Path, Path, str]:
+def _signed_files(
+    tmp_path: Path, *, expires_at: str = "2099-01-01T00:00:00Z"
+) -> tuple[Path, Path, str]:
     private, _, public_b64 = generate_ed25519_keypair()
     payload, signature = build_signed_config(
         private,
@@ -123,17 +125,20 @@ def test_doctor_rejects_malformed_verification_key_without_leaking_material(
     monkeypatch.setattr("hermes_tiered_memory.cli._module_available", lambda _: True)
     secret = "definitely-not-a-key"
 
-    assert main(
-        [
-            "doctor",
-            "--config",
-            str(config),
-            "--signature",
-            str(sig),
-            "--verification-key",
-            f"x={secret}",
-        ]
-    ) != 0
+    assert (
+        main(
+            [
+                "doctor",
+                "--config",
+                str(config),
+                "--signature",
+                str(sig),
+                "--verification-key",
+                f"x={secret}",
+            ]
+        )
+        != 0
+    )
 
     output = capsys.readouterr().out
     assert "FAIL protected config:" in output

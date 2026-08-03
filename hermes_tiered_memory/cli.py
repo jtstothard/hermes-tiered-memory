@@ -189,8 +189,10 @@ def _check_l2_reachability(url: str, timeout_seconds: float) -> tuple[bool, str]
 def _doctor(args: argparse.Namespace) -> int:
     """Run deterministic, read-only checks and fail if any check fails."""
     failures = 0
-    for label, module_name in (("optional extra: mnemosyne", "mnemosyne"),
-                               ("optional extra: hindsight", "hindsight")):
+    for label, module_name in (
+        ("optional extra: mnemosyne", "mnemosyne"),
+        ("optional extra: hindsight", "hindsight"),
+    ):
         passed, detail = _check_optional_extra(label, module_name)
         print(f"{'PASS' if passed else 'FAIL'} {detail}")
         failures += not passed
@@ -262,9 +264,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.command == "provision":
-        return args.func(args)
-    elif args.command == "doctor":
+    if args.command == "provision" or args.command == "doctor":
         return args.func(args)
 
     parser.print_help()
