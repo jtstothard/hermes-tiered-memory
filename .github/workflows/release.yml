@@ -29,13 +29,19 @@ jobs:
           python -m build
 
       - name: Create SHA256 checksums
-        run: sha256sum dist/*.whl dist/*.tar.gz > dist/SHA256SUMS
+        run: sha256sum dist/*.whl dist/*.tar.gz > checksums.sha256
 
-      - name: Upload distributions and checksums
+      - name: Upload distributions
         uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts
+          name: release-dist
           path: dist/
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: checksums.sha256
 
   publish:
     name: Publish to PyPI with trusted publishing
@@ -48,7 +54,7 @@ jobs:
       - name: Download distributions
         uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
+          name: release-dist
           path: dist
 
       - name: Publish distributions to PyPI
@@ -62,8 +68,13 @@ jobs:
       - name: Download distributions and checksums
         uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
+          name: release-dist
           path: dist
+
+      - name: Download checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: release-checksums
 
       - name: Attach release assets
         uses: softprops/action-gh-release@v2
@@ -72,4 +83,4 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
-            dist/SHA256SUMS
+            checksums.sha256
