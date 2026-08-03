@@ -45,6 +45,59 @@ if str(_REPO_ROOT) not in sys.path:
 from hermes_tiered_memory.config import ProtectedConfigLoader  # noqa: E402
 
 
+def generate_ed25519_keypair() -> tuple[ed25519.Ed25519PrivateKey, bytes, str]:
+    """Return a private key, PEM encoding, and base64 raw public key."""
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return private_key, pem, base64.b64encode(public_bytes).decode("ascii")
+
+
+def build_signed_config(
+    private_key: ed25519.Ed25519PrivateKey,
+    *,
+    key_id: str,
+    config_id: str,
+    host: str,
+    port: int = 443,
+    base_path: str = "/api/v1",
+    sequence: int = 1,
+    issued_at: str,
+    not_before: str,
+    expires_at: str,
+    ca_file: str | None = None,
+) -> tuple[bytes, bytes]:
+    """Build canonical protected-config bytes and its detached signature."""
+    payload = {
+        "schema_version": 1,
+        "key_id": key_id,
+        "config_id": config_id,
+        "sequence": sequence,
+        "issued_at": issued_at,
+        "not_before": not_before,
+        "expires_at": expires_at,
+        "hindsight": {
+            "scheme": "https",
+            "host": host,
+            "port": port,
+            "base_path": base_path,
+            "tls": {"verify": True, "ca_file": ca_file},
+            "proxy": {"enabled": False},
+        },
+    }
+    canonical = json.dumps(
+        payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
+    return canonical, private_key.sign(ProtectedConfigLoader.DOMAIN_SEPARATOR + canonical)
+
+
 def _write_file_strict(path: Path, data: bytes, *, force: bool) -> None:
     if path.exists() and not force:
         raise SystemExit(f"refusing to overwrite existing file: {path} (use --force)")
@@ -76,21 +129,12 @@ def _parse_rfc3339(value: str) -> str:
 
 
 def cmd_genkey(args: argparse.Namespace) -> int:
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
+    private_key, pem, public_b64 = generate_ed25519_keypair()
     out = Path(args.out) if args.out else Path(f"{args.key_id}.private.pem")
     _write_file_strict(out, pem, force=args.force)
     os.chmod(out, 0o600)
 
-    public_bytes = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    public_b64 = base64.b64encode(public_bytes).decode("ascii")
+
     print(f"private key written to: {out} (mode 0600)")
     print()
     print("Add this entry to tiered.verification_keys:")
@@ -112,25 +156,19 @@ def cmd_sign(args: argparse.Namespace) -> int:
     ).isoformat()
     issued_at = _parse_rfc3339(args.issued_at) if args.issued_at else not_before
 
-    payload = {
-        "schema_version": 1,
-        "key_id": args.key_id,
-        "config_id": args.config_id,
-        "sequence": int(args.sequence),
-        "issued_at": issued_at,
-        "not_before": not_before,
-        "expires_at": expires_at,
-        "hindsight": {
-            "scheme": "https",
-            "host": args.host,
-            "port": int(args.port),
-            "base_path": args.base_path,
-            "tls": {"verify": True, "ca_file": args.ca_file or None},
-            "proxy": {"enabled": False},
-        },
-    }
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
-    signature = private_key.sign(ProtectedConfigLoader.DOMAIN_SEPARATOR + canonical)
+    canonical, signature = build_signed_config(
+        private_key,
+        key_id=args.key_id,
+        config_id=args.config_id,
+        host=args.host,
+        port=int(args.port),
+        base_path=args.base_path,
+        sequence=int(args.sequence),
+        issued_at=issued_at,
+        not_before=not_before,
+        expires_at=expires_at,
+        ca_file=args.ca_file or None,
+    )
 
     out_path = Path(args.out)
     sig_path = Path(args.sig)
