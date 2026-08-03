@@ -110,6 +110,7 @@ def test_initialize_wires_real_adapters_outbox_and_worker(tmp_path, disposable_m
             "bank_mapping": {"profile": "profile-bank"},
             "batch_size": 2,
             "retry": {"max_attempts": 3, "backoff_seconds": [0]},
+            "hindsight": {"auth_mode": "api_key"},
             "protected_config": {
                 "path": str(config_path),
                 "signature": {"path": str(signature_path)},
@@ -166,6 +167,7 @@ def test_initialize_forwards_protected_ca_to_owned_l2_client(
     config = {
         "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "test-key"}}}},
         "tiered": {
+            "hindsight": {"auth_mode": "api_key"},
             "protected_config": {
                 "path": str(config_path),
                 "signature": {"path": str(signature_path)},
@@ -218,6 +220,7 @@ def test_initialize_fails_closed_without_valid_profile_hindsight_key(
             config={
                 "profiles": profile_config,
                 "tiered": {
+                    "hindsight": {"auth_mode": "api_key"},
                     "protected_config": {
                         "path": str(config_path),
                         "signature": {"path": str(signature_path)},
@@ -321,6 +324,7 @@ def test_initialize_loads_signed_config_via_verification_keys_block(
             "bank_mapping": {"profile": "profile-bank"},
             "batch_size": 1,
             "retry": {"max_attempts": 1, "backoff_seconds": [0]},
+            "hindsight": {"auth_mode": "api_key"},
             "verification_keys": [
                 {
                     "key_id": "prod-ed25519-1",
@@ -367,6 +371,7 @@ def test_initialize_fails_closed_without_verification_keys(tmp_path, disposable_
     config = {
         "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "test-key"}}}},
         "tiered": {
+            "hindsight": {"auth_mode": "api_key"},
             "protected_config": {
                 "path": str(config_path),
                 "signature": {"path": str(signature_path)},
@@ -393,6 +398,7 @@ def test_initialize_rejects_malformed_verification_keys(tmp_path, disposable_mne
     config = {
         "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "k"}}}},
         "tiered": {
+            "hindsight": {"auth_mode": "api_key"},
             "verification_keys": [
                 {"key_id": "bad", "algorithm": "ed25519", "public_key_b64": "too-short"}
             ],
@@ -418,3 +424,187 @@ def test_initialize_rejects_malformed_verification_keys(tmp_path, disposable_mne
     assert "verification_keys" in chain
     assert provider.protected_config is None
     ProtectedConfigLoader.clear_keys()
+
+
+# ---------------------------------------------------------------------------
+# auth_mode resolver: cloud (api_key) vs self-hosted (none)
+# ---------------------------------------------------------------------------
+
+
+def test_auth_mode_api_key_passes_real_key_to_l2_adapter(
+    tmp_path, disposable_mnemosyne, monkeypatch
+):
+    """auth_mode=api_key resolves the profile key and forwards it to the adapter."""
+    captured_headers: dict[str, object] = {}
+    config_path, signature_path = _write_signed_config(tmp_path)
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured_headers.update(kwargs.get("headers") or {})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient
+    )
+    api_key = "real-cloud-key"
+    config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {"api_key": api_key}}}},
+        "tiered": {
+            "hindsight": {"auth_mode": "api_key"},
+            "protected_config": {
+                "path": str(config_path),
+                "signature": {"path": str(signature_path)},
+            },
+        },
+    }
+    provider = CompositeProvider()
+    try:
+        provider.initialize(
+            "session-1",
+            config=config,
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+        assert isinstance(provider.l2_adapter, HindsightL2Adapter)
+        assert captured_headers["Authorization"] == f"Bearer {api_key}"
+    finally:
+        provider.close()
+
+
+def test_auth_mode_none_passes_no_key_to_l2_adapter(
+    tmp_path, disposable_mnemosyne, monkeypatch
+):
+    """auth_mode=none initializes the L2 adapter with api_key=None (no Authorization header)."""
+    captured_headers: dict[str, object] = {}
+    config_path, signature_path = _write_signed_config(tmp_path)
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured_headers.update(kwargs.get("headers") or {})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "hermes_tiered_memory.adapters.hindsight_l2.httpx.Client", CapturingClient
+    )
+    config = {
+        "profiles": {"profile": {}},
+        "tiered": {
+            "hindsight": {"auth_mode": "none"},
+            "protected_config": {
+                "path": str(config_path),
+                "signature": {"path": str(signature_path)},
+            },
+        },
+    }
+    provider = CompositeProvider()
+    try:
+        provider.initialize(
+            "session-1",
+            config=config,
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+        assert isinstance(provider.l2_adapter, HindsightL2Adapter)
+        # No Authorization header when auth_mode=none and api_key is None
+        assert "Authorization" not in captured_headers
+    finally:
+        provider.close()
+
+
+def test_auth_mode_api_key_without_key_fails_closed(
+    tmp_path, disposable_mnemosyne
+):
+    """auth_mode=api_key but no key in profile secrets => RuntimeError at startup."""
+    config_path, signature_path = _write_signed_config(tmp_path)
+    config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {}}}},
+        "tiered": {
+            "hindsight": {"auth_mode": "api_key"},
+            "protected_config": {
+                "path": str(config_path),
+                "signature": {"path": str(signature_path)},
+            },
+        },
+    }
+    provider = CompositeProvider()
+    with pytest.raises(RuntimeError, match="Tiered live adapters could not initialize"):
+        provider.initialize(
+            "session-1",
+            config=config,
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+    assert provider.l2_adapter is None
+
+
+def test_auth_mode_none_with_key_present_fails_closed(
+    tmp_path, disposable_mnemosyne
+):
+    """auth_mode=none but a key IS present => RuntimeError (misconfiguration signal)."""
+    config_path, signature_path = _write_signed_config(tmp_path)
+    config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "stray-key"}}}},
+        "tiered": {
+            "hindsight": {"auth_mode": "none"},
+            "protected_config": {
+                "path": str(config_path),
+                "signature": {"path": str(signature_path)},
+            },
+        },
+    }
+    provider = CompositeProvider()
+    with pytest.raises(RuntimeError, match="Tiered live adapters could not initialize"):
+        provider.initialize(
+            "session-1",
+            config=config,
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+    assert provider.l2_adapter is None
+
+
+@pytest.mark.parametrize(
+    "tiered_hindsight_block",
+    [
+        None,  # missing hindsight block entirely
+        {},  # empty hindsight block
+        {"auth_mode": ""},  # empty auth_mode
+        {"auth_mode": "   "},  # blank auth_mode
+        {"auth_mode": "bearer"},  # invalid mode value
+    ],
+)
+def test_auth_mode_missing_or_invalid_fails_closed(
+    tmp_path, disposable_mnemosyne, tiered_hindsight_block
+):
+    """Missing or invalid auth_mode => RuntimeError at startup."""
+    config_path, signature_path = _write_signed_config(tmp_path)
+    tiered: dict[str, object] = {
+        "protected_config": {
+            "path": str(config_path),
+            "signature": {"path": str(signature_path)},
+        },
+    }
+    if tiered_hindsight_block is not None:
+        tiered["hindsight"] = tiered_hindsight_block
+    config = {
+        "profiles": {"profile": {"secrets": {"hindsight": {"api_key": "k"}}}},
+        "tiered": tiered,
+    }
+    provider = CompositeProvider()
+    with pytest.raises(RuntimeError, match="Tiered live adapters could not initialize"):
+        provider.initialize(
+            "session-1",
+            config=config,
+            hermes_home=str(tmp_path / "hermes-home"),
+            agent_identity="profile",
+            chat_id="chat-1",
+        )
+    assert provider.l2_adapter is None

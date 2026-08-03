@@ -446,7 +446,7 @@ class CompositeProvider(MemoryProvider):
         if not self.protected_config:
             raise RuntimeError("protected Hindsight configuration is unavailable")
 
-        api_key = self._resolve_hindsight_api_key()
+        api_key = self._resolve_hindsight_auth()
         from hermes_tiered_memory.adapters.hindsight_l2 import HindsightL2Adapter
 
         self.l2_adapter = HindsightL2Adapter(
@@ -457,23 +457,87 @@ class CompositeProvider(MemoryProvider):
         )
         logger.info("L2 Hindsight adapter initialized")
 
-    def _resolve_hindsight_api_key(self) -> str:
-        """Return the active profile's required Hindsight API key without exposing it."""
+    def _resolve_hindsight_auth(self) -> str | None:
+        """Resolve the Hindsight API key based on the configured auth_mode.
+
+        Reads ``tiered.hindsight.auth_mode`` from the runtime config. Two modes
+        are supported:
+
+        - ``api_key`` (cloud Hindsight): resolve a non-empty key from the active
+          profile's protected secrets and return it.
+        - ``none`` (self-hosted Hindsight): return ``None`` to skip the
+          Authorization header entirely (the L2 adapter handles ``api_key=None``
+          correctly).
+
+        Both modes reject inconsistent combinations at startup (fail-closed):
+        ``api_key`` mode without a resolvable key, and ``none`` mode with a key
+        present in the profile secrets, are treated as misconfigurations.
+        """
+        tiered = self._runtime_config.get("tiered")
+        if not isinstance(tiered, dict):
+            raise RuntimeError("Tiered provider requires a tiered configuration mapping")
+        hindsight_block = tiered.get("hindsight")
+        if not isinstance(hindsight_block, dict):
+            raise RuntimeError(
+                "Tiered provider requires tiered.hindsight.auth_mode to be configured"
+            )
+        auth_mode = hindsight_block.get("auth_mode")
+        if not isinstance(auth_mode, str) or not auth_mode.strip():
+            raise RuntimeError(
+                "Tiered provider requires tiered.hindsight.auth_mode to be configured"
+            )
+        auth_mode = auth_mode.strip()
+
+        profile_key = self._extract_profile_hindsight_api_key()
+
+        if auth_mode == "api_key":
+            if not profile_key:
+                raise RuntimeError(
+                    "Tiered provider auth_mode=api_key requires an active profile "
+                    "Hindsight credential"
+                )
+            return profile_key
+
+        if auth_mode == "none":
+            if profile_key:
+                raise RuntimeError(
+                    "Tiered provider auth_mode=none conflicts with an active profile "
+                    "Hindsight credential present in the configuration"
+                )
+            return None
+
+        raise RuntimeError(
+            f"Tiered provider tiered.hindsight.auth_mode must be 'api_key' or 'none', "
+            f"got {auth_mode!r}"
+        )
+
+    def _extract_profile_hindsight_api_key(self) -> str | None:
+        """Return the active profile's Hindsight API key, or None if absent.
+
+        Unlike the legacy resolver, this never raises on a missing key — the
+        caller (auth-mode resolver) decides whether a missing key is an error.
+        It only raises on malformed config shapes that would prevent diagnosis.
+        """
         profiles = self._runtime_config.get("profiles")
         if not isinstance(profiles, dict):
-            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+            return None
         profile = profiles.get(self.active_profile_identity)
         if not isinstance(profile, dict):
-            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+            return None
         secrets = profile.get("secrets")
         if not isinstance(secrets, dict):
-            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+            return None
         hindsight = secrets.get("hindsight")
         if not isinstance(hindsight, dict):
-            raise RuntimeError("Tiered provider requires an active profile Hindsight credential")
+            return None
         api_key = hindsight.get("api_key")
-        if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
-            raise RuntimeError("Tiered provider requires a valid active profile Hindsight credential")
+        if not isinstance(api_key, str) or not api_key:
+            return None
+        if api_key != api_key.strip():
+            raise RuntimeError(
+                "Tiered provider requires a valid active profile Hindsight credential "
+                "(key must not be blank-padded)"
+            )
         return api_key
 
     def _initialize_outbox(self) -> None:
