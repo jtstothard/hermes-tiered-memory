@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import importlib.util
 import json
 import os
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+import httpx
+
+from hermes_tiered_memory.config import ProtectedConfigLoader
 from scripts.generate_protected_config import (
     _parse_rfc3339,
     _write_file_strict,
@@ -106,6 +114,105 @@ def _provision(args: argparse.Namespace) -> int:
     return 0
 
 
+def _module_available(module_name: str) -> bool:
+    """Return whether an optional runtime module can be imported."""
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _check_optional_extra(label: str, module_name: str) -> tuple[bool, str]:
+    distribution = {"mnemosyne": "mnemosyne-memory", "hindsight": "hindsight-client"}[module_name]
+    try:
+        version(distribution)
+    except PackageNotFoundError:
+        if not _module_available(module_name):
+            return False, f"{label}: unavailable (install the [{module_name}] extra)"
+    return True, f"{label}: installed"
+
+
+def _parse_verification_key(value: str) -> dict[str, str]:
+    """Parse a CLI key reference without including key material in errors."""
+    key_id, separator, material = value.partition("=")
+    if not separator or not key_id or not material or key_id != key_id.strip():
+        raise ValueError("expected KEY_ID=BASE64_PUBLIC_KEY")
+    try:
+        decoded = base64.b64decode(material, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("verification key is not valid base64") from exc
+    if len(decoded) != 32:
+        raise ValueError("Ed25519 verification key must decode to 32 bytes")
+    return {"key_id": key_id, "algorithm": "ed25519", "public_key_b64": material}
+
+
+def _check_protected_config(
+    config_path: str | None, signature_path: str | None, verification_keys: list[str]
+) -> tuple[bool, str]:
+    if not config_path or not signature_path:
+        return False, "protected config: missing --config or --signature"
+    try:
+        entries = [_parse_verification_key(value) for value in verification_keys]
+        if not entries:
+            raise ValueError("at least one --verification-key is required")
+        # Normal startup persists replay state. Doctor uses isolated state so it
+        # cannot mutate the operator's live config or replay ledger.
+        original_keys = ProtectedConfigLoader._pinned_keys.copy()
+        try:
+            ProtectedConfigLoader.clear_keys()
+            ProtectedConfigLoader.register_verification_keys(entries)
+            with tempfile.TemporaryDirectory(prefix="hermes-tiered-memory-doctor-") as isolated:
+                loader = ProtectedConfigLoader(
+                    Path(config_path), Path(signature_path), Path(isolated) / "replay-state.json"
+                )
+                loader.load()
+        finally:
+            ProtectedConfigLoader._pinned_keys = original_keys
+    except Exception:
+        # Exception text can contain paths, endpoint details, or supplied key
+        # material. Keep the operator-facing failure stable and non-sensitive.
+        return False, "protected config: invalid signature, schema, permissions, or expired config"
+    return True, "protected config: valid signature and unexpired"
+
+
+def _check_l2_reachability(url: str, timeout_seconds: float) -> tuple[bool, str]:
+    """Probe only /health; no credentials are sent or reported."""
+    try:
+        parsed = httpx.URL(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.host:
+            return False, "invalid endpoint URL"
+        response = httpx.get(str(parsed).rstrip("/") + "/health", timeout=timeout_seconds)
+        if 200 <= response.status_code < 300:
+            return True, "reachable"
+        return False, f"returned HTTP {response.status_code}"
+    except (httpx.HTTPError, ValueError):
+        return False, "endpoint unreachable"
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    """Run deterministic, read-only checks and fail if any check fails."""
+    failures = 0
+    for label, module_name in (("optional extra: mnemosyne", "mnemosyne"),
+                               ("optional extra: hindsight", "hindsight")):
+        passed, detail = _check_optional_extra(label, module_name)
+        print(f"{'PASS' if passed else 'FAIL'} {detail}")
+        failures += not passed
+
+    passed, detail = _check_protected_config(args.config, args.signature, args.verification_key)
+    print(f"{'PASS' if passed else 'FAIL'} {detail}")
+    failures += not passed
+
+    l1_available = _module_available("mnemosyne")
+    l1_detail = "available" if l1_available else "unavailable (install the [mnemosyne] extra)"
+    print(f"{'PASS' if l1_available else 'FAIL'} L1: {l1_detail}")
+    failures += not l1_available
+
+    if args.l2_url is None:
+        print("SKIP L2: no endpoint configured")
+    else:
+        reachable, detail = _check_l2_reachability(args.l2_url, args.l2_timeout)
+        print(f"{'PASS' if reachable else 'FAIL'} L2: {detail}")
+        failures += not reachable
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``hermes-tiered-memory`` console script."""
     parser = argparse.ArgumentParser(
@@ -136,18 +243,29 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--patch")
     provision.add_argument("--force", action="store_true")
     provision.set_defaults(func=_provision)
-    subparsers.add_parser(
+    doctor = subparsers.add_parser(
         "doctor",
         help="Run health checks against installed backends and config.",
     )
+    doctor.add_argument("--config", help="protected Hindsight config JSON")
+    doctor.add_argument("--signature", help="detached protected-config signature")
+    doctor.add_argument(
+        "--verification-key",
+        action="append",
+        default=[],
+        metavar="KEY_ID=BASE64_PUBLIC_KEY",
+        help="pinned Ed25519 public key (repeatable; key material is never reported)",
+    )
+    doctor.add_argument("--l2-url", help="optional Hindsight endpoint to probe")
+    doctor.add_argument("--l2-timeout", type=float, default=5.0)
+    doctor.set_defaults(func=_doctor)
 
     args = parser.parse_args(argv)
 
     if args.command == "provision":
         return args.func(args)
     elif args.command == "doctor":
-        print("doctor: not yet implemented")
-        return 0
+        return args.func(args)
 
     parser.print_help()
     return 1
