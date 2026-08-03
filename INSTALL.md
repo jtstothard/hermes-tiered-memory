@@ -1,78 +1,70 @@
 # Installing hermes-tiered-memory
 
-This guide walks through building the wheel and installing the plugin so the
-real Hermes memory-provider loader discovers and imports it.
+This guide installs the v1.0.0 package and makes it discoverable as a Hermes
+memory plugin.
 
-## Prerequisites
+## Requirements
 
-- Python 3.11–3.13 (the Hermes runtime Python)
-- The Hermes agent installed and `HERMES_HOME` known (typically `~/.hermes`)
+- Python `>=3.11,<3.14`
+- `hermes-agent>=0.7.0` in the same Python environment
+- A Hermes home directory that already exists
 
-## 1. Build the wheel
-
-```bash
-cd hermes-tiered-memory
-pip install build          # one-time, if not already present
-python -m build --wheel
-```
-
-This produces `dist/hermes_tiered_memory-0.1.0-py3-none-any.whl`.
-
-## 2. Run the install script
+For live L1/L2 operation, install both optional adapter extras:
 
 ```bash
-scripts/install_plugin.sh dist/hermes_tiered_memory-0.1.0-py3-none-any.whl ~/.hermes
+python3 -m pip install 'hermes-tiered-memory[mnemosyne,hindsight]'
 ```
 
-The script:
+## Install from a wheel
 
-- `pip install`s the wheel into the current Python environment.
-- Creates `~/.hermes/plugins/tiered-memory/__init__.py` as a thin shim that re-exports `register` and `register_memory_provider` from the installed package.
-- Writes `~/.hermes/plugins/tiered-memory/plugin.yaml`.
+From a source checkout, build a wheel and run the installer with the Python
+interpreter used by Hermes:
 
-It is **idempotent** — re-running upgrades cleanly (just overwrite).
+```bash
+python3 -m pip install build
+python3 -m build --wheel
+PYTHON=python3 scripts/install_plugin.sh \
+  dist/hermes_tiered_memory-1.0.0-py3-none-any.whl "$HERMES_HOME"
+```
 
-**Fail-closed:** the script aborts if `HERMES_HOME` is unset, the wheel is missing, or `pip install` fails.
+The installer pip-installs the wheel, verifies the import, creates
+`$HERMES_HOME/plugins/tiered-memory/`, and writes its discovery shim and
+`plugin.yaml`. Re-running it upgrades the installed package and rewrites the
+shim.
 
-## 3. Activate the provider
-
-In your Hermes profile's `config.yaml`:
+Set this in the selected profile's configuration and restart Hermes:
 
 ```yaml
 memory:
   provider: tiered-memory
 ```
 
-The value must match the plugin directory name (`tiered-memory`).
+This package exposes the three public tools `tiered_memory_search`,
+`tiered_memory_store`, and `tiered_memory_delete`. It does not provide a native
+`hermes tiered-memory` command.
 
-## 4. Restart Hermes
+## Configure and verify
 
-```bash
-hermes restart   # or however you restart your Hermes instance
-```
-
-The loader scans `$HERMES_HOME/plugins/` at startup. It will find `tiered-memory`, import the shim, and the shim re-exports the real `register(ctx)` from the pip-installed package.
-
-## How discovery works
-
-The Hermes loader (`plugins/memory/__init__.py` in the hermes-agent repo) does a cheap text scan of each plugin's `__init__.py` for the literal strings `register_memory_provider` or `MemoryProvider`. If neither is present, the directory is invisible. Our shim contains both.
-
-On load, the loader calls `register(ctx)` (or the alias `register_memory_provider(ctx)`), passing a simulated context. The provider constructs and validates itself before registering.
-
-## Verifying the install
+Use the standalone console script to create and validate protected endpoint
+configuration:
 
 ```bash
-python3 -c "
-from plugins.memory import list_memory_provider_names, find_provider_dir
-assert 'tiered-memory' in list_memory_provider_names()
-d = find_provider_dir('tiered-memory')
-assert d and d.is_dir()
-print('Discovered:', d)
-"
+hermes-tiered-memory provision --help
+hermes-tiered-memory doctor --help
 ```
+
+Keep generated private keys, signed configuration, and detached signatures
+mode `0600`. Put Hindsight credentials only in the active Hermes profile's
+secret configuration. See [README.md](README.md) and
+[docs/security.md](docs/security.md).
 
 ## Troubleshooting
 
-- **Plugin not discovered:** confirm `$HERMES_HOME/plugins/tiered-memory/__init__.py` exists and contains the string `register_memory_provider` or `MemoryProvider`.
-- **Import fails:** ensure the wheel was installed into the *same* Python environment Hermes runs in (`python3 -c "import hermes_tiered_memory"`).
-- **`is_available()` returns False:** this is expected when live adapter dependencies (Mnemosyne, Hindsight client) are not installed. Install them with `pip install '.[mnemosyne,hindsight]'` if you want live L1/L2.
+- If the plugin is not discovered, check that
+  `$HERMES_HOME/plugins/tiered-memory/__init__.py` exists and that the Hermes
+  process uses the same `HERMES_HOME`.
+- If import fails, install the wheel into the exact Python environment used by
+  Hermes and run `python3 -c 'import hermes_tiered_memory'`.
+- If startup fails closed, run `hermes-tiered-memory doctor` with the protected
+  config, detached signature, and pinned public key. Check `auth_mode`, the
+  active profile secret boundary, file permissions, and optional extras.
