@@ -19,7 +19,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import tempfile
 from pathlib import Path
 
 import cryptography.hazmat.primitives.asymmetric.ed25519 as ed25519
@@ -80,9 +79,13 @@ def _config(key_id: str = "admin-ed25519-1") -> dict:
     }
 
 
-def _write_config_and_ed25519_sig(directory: Path, data: dict, private_key: ed25519.Ed25519PrivateKey):
+def _write_config_and_ed25519_sig(
+    directory: Path, data: dict, private_key: ed25519.Ed25519PrivateKey
+):
     """Write canonical config + Ed25519 detached signature, return (config_path, sig_path)."""
-    payload = json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode(
+        "utf-8"
+    )
     config_path = Path(directory) / "protected.json"
     config_path.write_bytes(payload)
     config_path.chmod(0o600)
@@ -117,7 +120,9 @@ def test_register_verification_keys_ed25519_loads_end_to_end(tmp_path):
     private_key, public_bytes = _ed25519_keypair()
 
     # Register via the production seam (no test-only register_key)
-    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("admin-ed25519-1", public_bytes)])
+    ProtectedConfigLoader.register_verification_keys(
+        [_ed25519_entry("admin-ed25519-1", public_bytes)]
+    )
     assert "admin-ed25519-1" in ProtectedConfigLoader._pinned_keys
 
     config_path, sig_path = _write_config_and_ed25519_sig(tmp_path, _config(), private_key)
@@ -189,7 +194,11 @@ def test_empty_verification_keys_then_signed_config_fails_unauthorized(tmp_path)
         ),
         # unknown algorithm
         (
-            {"key_id": "bad-alg", "algorithm": "rsa-4096", "public_key_b64": base64.b64encode(b"x" * 32).decode()},
+            {
+                "key_id": "bad-alg",
+                "algorithm": "rsa-4096",
+                "public_key_b64": base64.b64encode(b"x" * 32).decode(),
+            },
             "Unsupported verification key algorithm",
         ),
         # missing public_key_b64 for ed25519
@@ -204,7 +213,11 @@ def test_empty_verification_keys_then_signed_config_fails_unauthorized(tmp_path)
         ),
         # empty key_id
         (
-            {"key_id": "  ", "algorithm": "ed25519", "public_key_b64": base64.b64encode(b"x" * 32).decode()},
+            {
+                "key_id": "  ",
+                "algorithm": "ed25519",
+                "public_key_b64": base64.b64encode(b"x" * 32).decode(),
+            },
             "non-empty key_id",
         ),
     ],
@@ -259,7 +272,9 @@ def test_duplicate_key_id_across_calls_conflicting_material_fails_closed():
     ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", public_bytes)])
     _, different_public_bytes = _ed25519_keypair()
     with pytest.raises(ProtectedConfigValidationError, match="already pinned"):
-        ProtectedConfigLoader.register_verification_keys([_ed25519_entry("dup", different_public_bytes)])
+        ProtectedConfigLoader.register_verification_keys(
+            [_ed25519_entry("dup", different_public_bytes)]
+        )
     # The original key must remain unchanged.
     assert ProtectedConfigLoader._pinned_keys["dup"] == (public_bytes,)
 
@@ -295,7 +310,9 @@ def test_config_signed_with_wrong_key_fails_signature_check(tmp_path):
     """key_id is registered but the signature was made by a different private key."""
     private_key_signer, _ = _ed25519_keypair()
     private_key_registered, public_registered = _ed25519_keypair()
-    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("admin-ed25519-1", public_registered)])
+    ProtectedConfigLoader.register_verification_keys(
+        [_ed25519_entry("admin-ed25519-1", public_registered)]
+    )
 
     config_path, sig_path = _write_config_and_ed25519_sig(tmp_path, _config(), private_key_signer)
 
@@ -305,7 +322,9 @@ def test_config_signed_with_wrong_key_fails_signature_check(tmp_path):
 
 def test_missing_signature_fails(tmp_path):
     private_key, public_bytes = _ed25519_keypair()
-    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("admin-ed25519-1", public_bytes)])
+    ProtectedConfigLoader.register_verification_keys(
+        [_ed25519_entry("admin-ed25519-1", public_bytes)]
+    )
     config_path, _ = _write_config_and_ed25519_sig(tmp_path, _config(), private_key)
 
     with pytest.raises(ProtectedConfigAuthError, match="Signature is required"):
@@ -317,7 +336,9 @@ def test_missing_signature_fails(tmp_path):
 
 def test_rollback_to_lower_sequence_rejected(tmp_path):
     private_key, public_bytes = _ed25519_keypair()
-    ProtectedConfigLoader.register_verification_keys([_ed25519_entry("admin-ed25519-1", public_bytes)])
+    ProtectedConfigLoader.register_verification_keys(
+        [_ed25519_entry("admin-ed25519-1", public_bytes)]
+    )
 
     # Accept sequence 2
     data = _config()
@@ -340,7 +361,9 @@ def test_seam_ignores_verification_env_vars(monkeypatch, tmp_path):
     """Environment variables must not supply verification keys (config block only)."""
     monkeypatch.setenv("HERMES_VERIFICATION_KEY_ID", "env-injected")
     monkeypatch.setenv("HERMES_VERIFICATION_KEY", base64.b64encode(b"x" * 32).decode())
-    monkeypatch.setenv("TIERED_VERIFICATION_KEYS", json.dumps([{"key_id": "env", "algorithm": "ed25519"}]))
+    monkeypatch.setenv(
+        "TIERED_VERIFICATION_KEYS", json.dumps([{"key_id": "env", "algorithm": "ed25519"}])
+    )
 
     # The seam only consults the explicit list argument; env is irrelevant.
     ProtectedConfigLoader.register_verification_keys([])

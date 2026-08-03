@@ -30,7 +30,7 @@ class WorkerConfig:
     retry_delays_seconds: list[int] = None  # type: ignore[assignment]
     max_attempts_per_cycle: int = 5
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.retry_delays_seconds is None:
             self.retry_delays_seconds = [10, 30, 90, 300]
 
@@ -178,9 +178,7 @@ class PromotionWorker:
                     )
                 else:
                     # CAS conflict, will be retried
-                    logger.warning(
-                        f"CAS conflict updating item {item.row_id} to PROMOTED"
-                    )
+                    logger.warning(f"CAS conflict updating item {item.row_id} to PROMOTED")
             else:
                 # Promotion failed
                 self._handle_failure(item, result.error or "Unknown error")

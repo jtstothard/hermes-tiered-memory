@@ -8,7 +8,7 @@ import pathlib
 import stat
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import cryptography.hazmat.primitives.asymmetric.ed25519 as ed25519
@@ -120,9 +120,7 @@ class ProtectedConfigLoader:
         and cross-entry ``key_id`` uniqueness.
         """
         if not isinstance(entries, list):
-            raise ProtectedConfigValidationError(
-                "verification_keys must be a list of key entries"
-            )
+            raise ProtectedConfigValidationError("verification_keys must be a list of key entries")
         staged: dict[str, bytes | tuple[bytes, ...]] = {}
         for entry in entries:
             if not isinstance(entry, dict):
@@ -199,11 +197,18 @@ class ProtectedConfigLoader:
             ) from e
         return material
 
-    def __init__(self, config_path: pathlib.Path, signature_path: pathlib.Path | None = None, replay_state_path: pathlib.Path | None = None):
+    def __init__(
+        self,
+        config_path: pathlib.Path,
+        signature_path: pathlib.Path | None = None,
+        replay_state_path: pathlib.Path | None = None,
+    ):
         """Initialize the loader with configuration and optional signature paths."""
         self.config_path = config_path
         self.signature_path = signature_path
-        self.replay_state_path = replay_state_path or config_path.with_name(f"{config_path.name}.replay-state")
+        self.replay_state_path = replay_state_path or config_path.with_name(
+            f"{config_path.name}.replay-state"
+        )
 
         # Track accepted sequence and digest for rollback prevention
         self._accepted_sequence: int | None = None
@@ -228,10 +233,14 @@ class ProtectedConfigLoader:
         stat_result = path_stat
 
         if not stat.S_ISREG(stat_result.st_mode):
-            raise ProtectedConfigValidationError(f"Protected config path is not a regular file: {path}")
+            raise ProtectedConfigValidationError(
+                f"Protected config path is not a regular file: {path}"
+            )
         current_uid = getattr(os, "getuid", lambda: None)()
         if current_uid is not None and stat_result.st_uid not in {0, current_uid}:
-            raise ProtectedConfigValidationError(f"Protected config file has unsafe ownership: {path}")
+            raise ProtectedConfigValidationError(
+                f"Protected config file has unsafe ownership: {path}"
+            )
 
         # Reject group/world writable
         if stat_result.st_mode & 0o022:
@@ -266,9 +275,17 @@ class ProtectedConfigLoader:
             return result
 
         try:
-            data = json.loads(text, object_pairs_hook=object_pairs_hook, parse_constant=lambda value: (_ for _ in ()).throw(ProtectedConfigValidationError(f"Unsupported non-finite number {value} in {path}")))
+            data = json.loads(
+                text,
+                object_pairs_hook=object_pairs_hook,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ProtectedConfigValidationError(
+                        f"Unsupported non-finite number {value} in {path}"
+                    )
+                ),
+            )
         except json.JSONDecodeError as e:
-            raise ProtectedConfigValidationError(f"Invalid JSON in {path}: {e}")
+            raise ProtectedConfigValidationError(f"Invalid JSON in {path}: {e}") from e
 
         if not isinstance(data, dict):
             raise ProtectedConfigValidationError("Protected config root must be an object")
@@ -291,7 +308,9 @@ class ProtectedConfigLoader:
         ).encode("utf-8")
 
         if content != raw_bytes:
-            raise ProtectedConfigValidationError(f"Protected config is not encoded as exact canonical JSON: {path}")
+            raise ProtectedConfigValidationError(
+                f"Protected config is not encoded as exact canonical JSON: {path}"
+            )
         return data, content
 
     def _load_replay_state(self) -> None:
@@ -300,13 +319,21 @@ class ProtectedConfigLoader:
         self._validate_file(self.replay_state_path)
         try:
             state = json.loads(self.replay_state_path.read_bytes().decode("utf-8"))
-            if (not isinstance(state, dict) or set(state) != {"config_id", "sequence", "digest"} or not isinstance(state.get("config_id"), str) or type(state.get("sequence")) is not int or not isinstance(state.get("digest"), str)):
+            if (
+                not isinstance(state, dict)
+                or set(state) != {"config_id", "sequence", "digest"}
+                or not isinstance(state.get("config_id"), str)
+                or type(state.get("sequence")) is not int
+                or not isinstance(state.get("digest"), str)
+            ):
                 raise ValueError("invalid replay state shape")
             self._last_config_id = state["config_id"]
             self._accepted_sequence = state["sequence"]
             self._accepted_digest = state["digest"]
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
-            raise ProtectedConfigValidationError(f"Invalid protected config replay state: {self.replay_state_path}") from e
+            raise ProtectedConfigValidationError(
+                f"Invalid protected config replay state: {self.replay_state_path}"
+            ) from e
 
     def _persist_replay_state(self, config: ProtectedConfig) -> None:
         parent = self.replay_state_path.parent
@@ -314,7 +341,15 @@ class ProtectedConfigLoader:
         temporary = self.replay_state_path.with_name(f".{self.replay_state_path.name}.tmp")
         self._validate_file(self.replay_state_path, must_exist=False)
         self._validate_file(temporary, must_exist=False)
-        payload = json.dumps({"config_id": config.config_id, "sequence": config.sequence, "digest": config.payload_digest}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        payload = json.dumps(
+            {
+                "config_id": config.config_id,
+                "sequence": config.sequence,
+                "digest": config.payload_digest,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
         fd = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
@@ -340,10 +375,10 @@ class ProtectedConfigLoader:
         try:
             dt = datetime.fromisoformat(value)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt
         except ValueError as e:
-            raise ProtectedConfigValidationError(f"Invalid timestamp '{value}': {e}")
+            raise ProtectedConfigValidationError(f"Invalid timestamp '{value}': {e}") from e
 
     def _validate_config_schema(self, data: dict[str, Any]) -> None:
         """Validate the configuration schema."""
@@ -379,15 +414,15 @@ class ProtectedConfigLoader:
         # Validate timestamps are strings before parsing
         for field in ["issued_at", "not_before", "expires_at"]:
             if not isinstance(data[field], str):
-                raise ProtectedConfigValidationError(f"Invalid {field}: expected string, got {type(data[field]).__name__}")
+                raise ProtectedConfigValidationError(
+                    f"Invalid {field}: expected string, got {type(data[field]).__name__}"
+                )
         data["issued_at_parsed"] = self._parse_timestamp(data["issued_at"])
         data["not_before_parsed"] = self._parse_timestamp(data["not_before"])
         data["expires_at_parsed"] = self._parse_timestamp(data["expires_at"])
 
         # Validate timestamp ordering
-        if not (
-            data["issued_at_parsed"] <= data["not_before_parsed"] <= data["expires_at_parsed"]
-        ):
+        if not (data["issued_at_parsed"] <= data["not_before_parsed"] <= data["expires_at_parsed"]):
             raise ProtectedConfigValidationError("Invalid timestamp ordering")
 
         # Validate hindsight config
@@ -406,7 +441,9 @@ class ProtectedConfigLoader:
 
         unknown_hindsight = set(hindsight) - required_hindsight_fields
         if unknown_hindsight:
-            raise ProtectedConfigValidationError(f"Unsupported hindsight fields: {unknown_hindsight}")
+            raise ProtectedConfigValidationError(
+                f"Unsupported hindsight fields: {unknown_hindsight}"
+            )
 
         # Validate scheme is a string
         if not isinstance(hindsight["scheme"], str):
@@ -437,7 +474,9 @@ class ProtectedConfigLoader:
         if not isinstance(tls.get("verify"), bool):
             raise ProtectedConfigValidationError(f"Invalid tls.verify: {tls.get('verify')}")
         if not tls["verify"]:
-            raise ProtectedConfigValidationError("Invalid tls.verify: TLS verification must be enabled")
+            raise ProtectedConfigValidationError(
+                "Invalid tls.verify: TLS verification must be enabled"
+            )
 
         ca_file = tls.get("ca_file")
         if ca_file is not None:
@@ -446,11 +485,15 @@ class ProtectedConfigLoader:
                 or not ca_file.strip()
                 or any(ord(character) < 32 or ord(character) == 127 for character in ca_file)
             ):
-                raise ProtectedConfigValidationError("Invalid tls.ca_file: expected a canonical absolute path")
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected a canonical absolute path"
+                )
 
             ca_path = pathlib.Path(ca_file)
             if not ca_path.is_absolute():
-                raise ProtectedConfigValidationError("Invalid tls.ca_file: expected a canonical absolute path")
+                raise ProtectedConfigValidationError(
+                    "Invalid tls.ca_file: expected a canonical absolute path"
+                )
             try:
                 canonical_ca_path = ca_path.resolve(strict=True)
             except (OSError, RuntimeError, ValueError) as e:
@@ -486,7 +529,7 @@ class ProtectedConfigLoader:
 
     def _validate_freshness(self, config: ProtectedConfig) -> None:
         """Validate config freshness (clock skew, expiry, sequence)."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Check clock skew
         if config.not_before > now + timedelta(seconds=self.CLOCK_SKEW_SECONDS):
@@ -500,10 +543,17 @@ class ProtectedConfigLoader:
         if self._accepted_sequence is not None and config.config_id == self._last_config_id:
             if config.sequence < self._accepted_sequence:
                 raise ProtectedConfigFreshnessError(
-                    f"Config sequence {config.sequence} is less than accepted {self._accepted_sequence}"
+                    f"Config sequence {config.sequence} is less than accepted "
+                    f"{self._accepted_sequence}"
                 )
-            if config.sequence == self._accepted_sequence and config.payload_digest != self._accepted_digest:
-                raise ProtectedConfigFreshnessError(f"Config sequence {config.sequence} changed payload without incrementing sequence")
+            if (
+                config.sequence == self._accepted_sequence
+                and config.payload_digest != self._accepted_digest
+            ):
+                raise ProtectedConfigFreshnessError(
+                    f"Config sequence {config.sequence} changed payload without "
+                    "incrementing sequence"
+                )
 
     def _validate_signature(
         self, payload: bytes, key_id: str, signature_data: bytes | None
@@ -522,7 +572,9 @@ class ProtectedConfigLoader:
         try:
             secret = key_material if isinstance(key_material, bytes) else None
             if secret is not None:
-                expected_sig = hmac.new(secret, self.DOMAIN_SEPARATOR + payload, hashlib.sha256).digest()
+                expected_sig = hmac.new(
+                    secret, self.DOMAIN_SEPARATOR + payload, hashlib.sha256
+                ).digest()
 
                 if not hmac.compare_digest(expected_sig, signature_data):
                     raise ProtectedConfigAuthError(
@@ -534,17 +586,15 @@ class ProtectedConfigLoader:
 
         # Try Ed25519
         try:
-            public_key_bytes = (
-                key_material[0]
-                if isinstance(key_material, tuple)
-                else None
-            )
+            public_key_bytes = key_material[0] if isinstance(key_material, tuple) else None
             if public_key_bytes is not None:
                 public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_bytes)
                 public_key.verify(signature_data, self.DOMAIN_SEPARATOR + payload)
                 return
         except Exception as e:
-            raise ProtectedConfigAuthError(f"Invalid {self.ALGORITHM_ED25519} signature: {e}")
+            raise ProtectedConfigAuthError(
+                f"Invalid {self.ALGORITHM_ED25519} signature: {e}"
+            ) from e
 
         raise ProtectedConfigAuthError("Unsupported signature algorithm")
 

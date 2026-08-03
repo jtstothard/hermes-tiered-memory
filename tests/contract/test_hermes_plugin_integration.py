@@ -141,7 +141,9 @@ profiles:
     provider = load_memory_provider("tiered-memory")
     assert provider is not None
     captured = []
-    monkeypatch.setattr(provider, "initialize_all", lambda: captured.append(provider._runtime_config))
+    monkeypatch.setattr(
+        provider, "initialize_all", lambda: captured.append(provider._runtime_config)
+    )
 
     manager = MemoryManager()
     manager.add_provider(provider)

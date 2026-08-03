@@ -9,7 +9,7 @@ from hermes_tiered_memory.adapters.l1 import L1Adapter, L1Record
 class MockL1Adapter(L1Adapter):
     """Mock L1 adapter for testing."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the mock L1 adapter."""
         self._records: dict[str, tuple[int, L1Record]] = {}
         self._closed = False
@@ -40,10 +40,10 @@ class MockL1Adapter(L1Adapter):
     def recall(self, query: str, limit: int = 10) -> list[L1Record]:
         """Query L1 for relevant records."""
         # Simple substring match for testing
-        results = []
+        results: list[L1Record] = []
         query_lower = query.lower()
 
-        for revision, record in self._records.values():
+        for _revision, record in self._records.values():
             if len(results) >= limit:
                 break
             if record.is_deleted:

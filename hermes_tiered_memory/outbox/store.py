@@ -1,23 +1,19 @@
 """Durable outbox storage for crash-safe L2 promotion."""
 
 import json
+import logging
 import sqlite3
 import threading
 import time
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-import logging
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
-
-from hermes_tiered_memory.adapters.l1 import L1Record
 
 logger = logging.getLogger(__name__)
 
 
-class OutboxState(str, Enum):
+class OutboxState(StrEnum):
     """States for outbox items."""
 
     PENDING = "pending"
@@ -27,7 +23,7 @@ class OutboxState(str, Enum):
     QUARANTINED = "quarantined"
 
 
-class TerminalOutcome(str, Enum):
+class TerminalOutcome(StrEnum):
     """Terminal outcome classifications."""
 
     NONE = "none"
@@ -101,7 +97,9 @@ class OutboxItem:
             metadata_snapshot=data["metadata_snapshot"],
             state=OutboxState(data["state"]),
             state_version=data["state_version"],
-            terminal_outcome=TerminalOutcome(data.get("terminal_outcome", TerminalOutcome.NONE.value)),
+            terminal_outcome=TerminalOutcome(
+                data.get("terminal_outcome", TerminalOutcome.NONE.value)
+            ),
             owner_id=data.get("owner_id", ""),
             lease_id=data.get("lease_id", ""),
             lease_expires_at=data.get("lease_expires_at", 0),
@@ -153,7 +151,7 @@ class OutboxStore:
                 connection.close()
                 raise
             self._local.conn = connection
-        return self._local.conn
+        return self._local.conn  # type: ignore[no-any-return]
 
     @staticmethod
     def _ensure_delete_journal(connection: sqlite3.Connection) -> None:
@@ -176,8 +174,7 @@ class OutboxStore:
     def _initialize_schema(self) -> None:
         """Initialize the outbox schema."""
         conn = self._get_connection()
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS outbox (
                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 document_id TEXT NOT NULL,
@@ -202,14 +199,11 @@ class OutboxStore:
                 updated_at INTEGER NOT NULL,
                 UNIQUE(document_id, mnemosyne_rev)
             )
-        """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_outbox_state_retry
             ON outbox(state, next_retry_at)
-        """
-        )
+        """)
         conn.commit()
 
     def initialize_schema_on(self, connection: sqlite3.Connection, schema: str = "main") -> None:
@@ -237,7 +231,9 @@ class OutboxStore:
         # The unique identity constraint is sufficient for this write slice. The
         # normal OutboxStore connection creates the worker index separately.
 
-    def prepare_for_atomic_attach(self, connection: sqlite3.Connection, schema: str = "outbox") -> None:
+    def prepare_for_atomic_attach(
+        self, connection: sqlite3.Connection, schema: str = "outbox"
+    ) -> None:
         """Validate the already-established policy on an attached database.
 
         No connection is closed here.  Thread-local connections belong to
@@ -248,21 +244,43 @@ class OutboxStore:
         if str(mode).lower() != "delete":
             raise RuntimeError(f"attached outbox journal mode is {mode!r}, expected 'delete'")
 
-    def enqueue_on(self, connection: sqlite3.Connection, *, schema: str = "main",
-                   document_id: str, mnemosyne_id: str, mnemosyne_rev: int,
-                   content: str, metadata: dict[str, Any]) -> int:
+    def enqueue_on(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        schema: str = "main",
+        document_id: str,
+        mnemosyne_id: str,
+        mnemosyne_rev: int,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> int:
         """Insert without committing; the caller owns the transaction."""
         now = int(time.time())
         cursor = connection.execute(
-            f'''INSERT INTO "{schema}".outbox (
+            f"""INSERT INTO "{schema}".outbox (
                 document_id, mnemosyne_id, mnemosyne_rev, content_snapshot,
                 metadata_snapshot, state, state_version, terminal_outcome,
                 fence, attempt_no, retry_cycle_no, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (document_id, mnemosyne_id, mnemosyne_rev, content,
-             json.dumps(metadata, separators=(",", ":")), OutboxState.PENDING.value,
-             0, TerminalOutcome.NONE.value, 0, 0, 0, now, now),
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                document_id,
+                mnemosyne_id,
+                mnemosyne_rev,
+                content,
+                json.dumps(metadata, separators=(",", ":")),
+                OutboxState.PENDING.value,
+                0,
+                TerminalOutcome.NONE.value,
+                0,
+                0,
+                0,
+                now,
+                now,
+            ),
         )
+        if cursor.lastrowid is None:
+            raise RuntimeError("SQLite did not return an outbox row ID")
         return int(cursor.lastrowid)
 
     def enqueue(
@@ -307,6 +325,8 @@ class OutboxStore:
         conn.commit()
 
         row_id = cursor.lastrowid
+        if row_id is None:
+            raise RuntimeError("SQLite did not return an outbox row ID")
         item = self.get(row_id)
         if item is None:
             raise RuntimeError("Failed to retrieve enqueued item")
@@ -315,17 +335,13 @@ class OutboxStore:
     def get(self, row_id: int) -> OutboxItem | None:
         """Get an item by row_id."""
         conn = self._get_connection()
-        cursor = conn.execute(
-            "SELECT * FROM outbox WHERE row_id = ?", (row_id,)
-        )
+        cursor = conn.execute("SELECT * FROM outbox WHERE row_id = ?", (row_id,))
         row = cursor.fetchone()
         if row is None:
             return None
         return OutboxItem.from_dict(dict(row))
 
-    def get_by_identity(
-        self, document_id: str, mnemosyne_rev: int
-    ) -> OutboxItem | None:
+    def get_by_identity(self, document_id: str, mnemosyne_rev: int) -> OutboxItem | None:
         """Get an item by logical identity."""
         conn = self._get_connection()
         cursor = conn.execute(
@@ -493,7 +509,8 @@ class OutboxStore:
         # Set quarantine_origin_at when entering quarantine
         if new_state == OutboxState.QUARANTINED:
             set_clauses.append(
-                "quarantine_origin_at = CASE WHEN quarantine_origin_at IS NULL OR quarantine_origin_at = 0 THEN ? ELSE quarantine_origin_at END"
+                "quarantine_origin_at = CASE WHEN quarantine_origin_at IS NULL "
+                "OR quarantine_origin_at = 0 THEN ? ELSE quarantine_origin_at END"
             )
             params.append(now)
 
@@ -517,9 +534,7 @@ class OutboxStore:
         stats = {}
 
         for state in OutboxState:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM outbox WHERE state = ?", (state.value,)
-            )
+            cursor = conn.execute("SELECT COUNT(*) FROM outbox WHERE state = ?", (state.value,))
             stats[state.value] = cursor.fetchone()[0]
 
         return stats

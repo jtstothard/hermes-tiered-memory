@@ -1,7 +1,6 @@
 """Unit tests for the composite provider."""
 
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -48,9 +47,7 @@ def composite_provider(temp_hermes_home, mock_session):
     # Initialize outbox
     from hermes_tiered_memory.outbox.store import OutboxStore
 
-    outbox_db_path = (
-        temp_hermes_home / "profiles" / "test-profile" / "tiered-memory" / "outbox.db"
-    )
+    outbox_db_path = temp_hermes_home / "profiles" / "test-profile" / "tiered-memory" / "outbox.db"
     outbox_db_path.parent.mkdir(parents=True, exist_ok=True)
     provider.outbox_store = OutboxStore(outbox_db_path)
 
@@ -129,7 +126,7 @@ class TestMemorySearch:
     def test_search_returns_l1_hit(self, composite_provider):
         """Test search returns L1 results on cache hit."""
         # Store a memory
-        stored = composite_provider.memory_store("Python programming", {"topic": "tech"})
+        composite_provider.memory_store("Python programming", {"topic": "tech"})
 
         # Search for it
         results = composite_provider.memory_search("Python", limit=10)

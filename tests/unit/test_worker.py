@@ -2,12 +2,11 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
 
 import pytest
 
 from hermes_tiered_memory.adapters.mock_l2 import MockL2Adapter
-from hermes_tiered_memory.outbox.store import OutboxItem, OutboxState, OutboxStore
+from hermes_tiered_memory.outbox.store import OutboxState, OutboxStore
 from hermes_tiered_memory.outbox.worker import PromotionWorker, WorkerConfig
 
 
@@ -173,16 +172,14 @@ class TestWorkerRetryLogic:
         worker._thread.join(timeout=2.0)
 
         # Check item was processed
-        updated = outbox_store.get(item.row_id)
+        outbox_store.get(item.row_id)
         # Should be either promoted or in a retry state
 
 
 class TestStaleUpsertRejection:
     """Test that stale upserts are rejected after a delete."""
 
-    def test_latest_delete_revision_returns_none_when_no_deletes(
-        self, outbox_store
-    ):
+    def test_latest_delete_revision_returns_none_when_no_deletes(self, outbox_store):
         """Test latest_delete_revision returns None when no deletes exist."""
         # Enqueue an upsert
         outbox_store.enqueue(
@@ -197,12 +194,10 @@ class TestStaleUpsertRejection:
         delete_rev = outbox_store.latest_delete_revision("doc-1")
         assert delete_rev is None
 
-    def test_latest_delete_revision_returns_correct_revision(
-        self, outbox_store
-    ):
+    def test_latest_delete_revision_returns_correct_revision(self, outbox_store):
         """Test latest_delete_revision returns the highest delete revision."""
         # Enqueue deletes at different revisions
-        delete_2 = outbox_store.enqueue(
+        outbox_store.enqueue(
             document_id="doc-1",
             mnemosyne_id="mne-1",
             mnemosyne_rev=2,
@@ -250,9 +245,7 @@ class TestStaleUpsertRejection:
         delete_rev = outbox_store.latest_delete_revision("doc-1")
         assert delete_rev == 5
 
-    def test_latest_delete_revision_is_document_specific(
-        self, outbox_store
-    ):
+    def test_latest_delete_revision_is_document_specific(self, outbox_store):
         """Test latest_delete_revision doesn't leak across documents."""
         # Enqueue delete for doc-1
         delete_1 = outbox_store.enqueue(
@@ -319,9 +312,7 @@ class TestStaleUpsertRejection:
         # (delete was processed instead)
         l2_calls = mock_l2_adapter.get_retain_calls()
         # No retain calls because upsert was rejected before L2 call
-        retain_calls_for_doc1 = [
-            c for c in l2_calls if c.get("document_id") == "doc-1"
-        ]
+        retain_calls_for_doc1 = [c for c in l2_calls if c.get("document_id") == "doc-1"]
         assert len(retain_calls_for_doc1) == 0
 
     def test_worker_accepts_upsert_after_delete(self, outbox_store, mock_l2_adapter):
@@ -391,7 +382,6 @@ class TestStaleUpsertRejection:
         )
 
         # Claim a batch of all 3 items
-        import time
 
         worker = PromotionWorker(
             outbox_store=outbox_store,
@@ -474,9 +464,7 @@ class TestStaleUpsertRejection:
         assert delete_item.row_id in row_ids
         assert upsert_item.row_id in row_ids
 
-    def test_crash_replay_inflight_delete_doesnt_block_upsert(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_crash_replay_inflight_delete_doesnt_block_upsert(self, outbox_store, mock_l2_adapter):
         """Test that an in-flight delete (not durable) doesn't block upserts."""
         # Enqueue delete
         delete_item = outbox_store.enqueue(
@@ -517,9 +505,7 @@ class TestStaleUpsertRejection:
         upsert_result = outbox_store.get(upsert_item.row_id)
         assert upsert_result.state == OutboxState.PROMOTED
 
-    def test_crash_replay_promoted_delete_blocks_stale_upsert(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_crash_replay_promoted_delete_blocks_stale_upsert(self, outbox_store, mock_l2_adapter):
         """Test that a promoted delete blocks stale upserts after crash-replay."""
         # Enqueue delete
         delete_item = outbox_store.enqueue(
@@ -559,9 +545,7 @@ class TestStaleUpsertRejection:
         assert upsert_result.state == OutboxState.QUARANTINED
         assert upsert_result.terminal_outcome.value == "stale_superseded"
 
-    def test_backfill_after_delete_accepts_higher_revision(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_backfill_after_delete_accepts_higher_revision(self, outbox_store, mock_l2_adapter):
         """Test that backfill upserts with higher revisions are accepted after delete."""
         # Enqueue and promote delete
         delete_item = outbox_store.enqueue(
@@ -600,15 +584,11 @@ class TestStaleUpsertRejection:
 
         # Verify the upsert actually reached L2 via retain()
         l2_calls = mock_l2_adapter.get_retain_calls()
-        retain_calls_for_doc1 = [
-            c for c in l2_calls if c.get("document_id") == "doc-1"
-        ]
+        retain_calls_for_doc1 = [c for c in l2_calls if c.get("document_id") == "doc-1"]
         assert len(retain_calls_for_doc1) == 1
         assert retain_calls_for_doc1[0]["content"] == "Backfilled content"
 
-    def test_backfill_after_delete_rejects_lower_revision(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_backfill_after_delete_rejects_lower_revision(self, outbox_store, mock_l2_adapter):
         """Test that backfill upserts with lower revisions are rejected after delete."""
         # Enqueue and promote delete
         delete_item = outbox_store.enqueue(
@@ -726,14 +706,10 @@ class TestStaleUpsertRejection:
         # If both were processed, verify no resurrection at L2
         if delete_result.state == OutboxState.PROMOTED:
             l2_calls = mock_l2_adapter.get_retain_calls()
-            retain_calls_for_doc1 = [
-                c for c in l2_calls if c.get("document_id") == "doc-1"
-            ]
+            retain_calls_for_doc1 = [c for c in l2_calls if c.get("document_id") == "doc-1"]
             assert len(retain_calls_for_doc1) == 0
 
-    def test_genuine_concurrent_claim_race(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_genuine_concurrent_claim_race(self, outbox_store, mock_l2_adapter):
         """Two workers call claim_batch simultaneously; only one gets the items.
 
         Uses real threads to exercise the claim race. SQLite's row-level locking
@@ -743,7 +719,7 @@ class TestStaleUpsertRejection:
         import threading
 
         # Enqueue a single delete for one document
-        delete_item = outbox_store.enqueue(
+        outbox_store.enqueue(
             document_id="doc-1",
             mnemosyne_id="mne-1",
             mnemosyne_rev=2,
@@ -782,12 +758,10 @@ class TestStaleUpsertRejection:
             f"a={results['a']}, b={results['b']}"
         )
 
-    def test_quarantined_stale_superseded_never_retries(
-        self, outbox_store, mock_l2_adapter
-    ):
+    def test_quarantined_stale_superseded_never_retries(self, outbox_store, mock_l2_adapter):
         """Test that quarantined STALE_SUPERSEDED items never retry."""
         # Enqueue delete
-        delete_item = outbox_store.enqueue(
+        outbox_store.enqueue(
             document_id="doc-1",
             mnemosyne_id="mne-1",
             mnemosyne_rev=2,

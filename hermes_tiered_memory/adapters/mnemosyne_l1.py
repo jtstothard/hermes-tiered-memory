@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,14 +48,16 @@ class MnemosyneL1Adapter(L1Adapter):
         self._lock = threading.RLock()
 
         try:
-            from mnemosyne.core.memory import Mnemosyne
+            from mnemosyne.core.memory import Mnemosyne  # type: ignore[import-untyped]
         except ImportError as exc:
             raise RuntimeError("Mnemosyne v3.14.x dependency is unavailable") from exc
 
         bank_dir = self.data_dir / "banks" / self.bank
         bank_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = bank_dir / "mnemosyne.db"
-        self._ledger = sqlite3.connect(bank_dir / "tiered-memory-l1-ledger.sqlite", check_same_thread=False)
+        self._ledger = sqlite3.connect(
+            bank_dir / "tiered-memory-l1-ledger.sqlite", check_same_thread=False
+        )
         self._initialize_ledger()
         try:
             self._memory = Mnemosyne(
@@ -108,9 +110,13 @@ class MnemosyneL1Adapter(L1Adapter):
             try:
                 source_ids = self._memory.beam.remember_batch(upstream_items)
                 if not isinstance(source_ids, list) or len(source_ids) != len(items):
-                    raise RuntimeError("Mnemosyne batch response does not match requested item count")
+                    raise RuntimeError(
+                        "Mnemosyne batch response does not match requested item count"
+                    )
                 if any(not isinstance(source_id, str) or not source_id for source_id in source_ids):
-                    raise RuntimeError("Mnemosyne batch response contains an invalid source identity")
+                    raise RuntimeError(
+                        "Mnemosyne batch response contains an invalid source identity"
+                    )
                 records = [self._normalize_live(source_id) for source_id in source_ids]
                 with self._ledger:
                     for record in records:
@@ -183,7 +189,7 @@ class MnemosyneL1Adapter(L1Adapter):
                     content=existing.content,
                     metadata=existing.metadata,
                     created_at=existing.created_at,
-                    updated_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(UTC),
                     is_deleted=True,
                 )
                 self._replace_ledger(tombstone)
@@ -291,8 +297,7 @@ class MnemosyneL1Adapter(L1Adapter):
     def _initialize_ledger(self) -> None:
         self._ledger.row_factory = sqlite3.Row
         with self._ledger:
-            self._ledger.execute(
-                """CREATE TABLE IF NOT EXISTS records (
+            self._ledger.execute("""CREATE TABLE IF NOT EXISTS records (
                     source_id TEXT NOT NULL,
                     profile TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -304,11 +309,9 @@ class MnemosyneL1Adapter(L1Adapter):
                     updated_at TEXT NOT NULL,
                     is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
                     PRIMARY KEY (source_id, profile, session_id, channel_id)
-                )"""
-            )
+                )""")
             columns = {
-                row["name"]
-                for row in self._ledger.execute("PRAGMA table_info(records)").fetchall()
+                row["name"] for row in self._ledger.execute("PRAGMA table_info(records)").fetchall()
             }
             if not {"profile", "session_id", "channel_id"}.issubset(columns):
                 # A legacy ledger keyed by source_id alone cannot safely share a
@@ -316,8 +319,7 @@ class MnemosyneL1Adapter(L1Adapter):
                 # upstream source ID. Migrate its rows into an unaddressable
                 # empty scope so legacy data remains preserved but fail-closed.
                 self._ledger.execute("ALTER TABLE records RENAME TO records_legacy")
-                self._ledger.execute(
-                    """CREATE TABLE records (
+                self._ledger.execute("""CREATE TABLE records (
                         source_id TEXT NOT NULL,
                         profile TEXT NOT NULL,
                         session_id TEXT NOT NULL,
@@ -329,25 +331,27 @@ class MnemosyneL1Adapter(L1Adapter):
                         updated_at TEXT NOT NULL,
                         is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
                         PRIMARY KEY (source_id, profile, session_id, channel_id)
-                    )"""
-                )
-                self._ledger.execute(
-                    """INSERT INTO records
-                    (source_id, profile, session_id, channel_id, revision, content, metadata_json, created_at, updated_at, is_deleted)
-                    SELECT source_id, '', '', '', revision, content, metadata_json, created_at, updated_at, is_deleted
-                    FROM records_legacy"""
-                )
+                    )""")
+                self._ledger.execute("""INSERT INTO records
+                    (source_id, profile, session_id, channel_id, revision, content,
+                     metadata_json, created_at, updated_at, is_deleted)
+                    SELECT source_id, '', '', '', revision, content, metadata_json,
+                    created_at, updated_at, is_deleted
+                    FROM records_legacy""")
                 self._ledger.execute("DROP TABLE records_legacy")
 
     def _insert_ledger(self, record: L1Record, *, commit: bool = True) -> None:
         if self._ledger_row(record.source_id) is not None:
-            raise RuntimeError("Mnemosyne returned an existing source identity; refusing unsafe overwrite")
+            raise RuntimeError(
+                "Mnemosyne returned an existing source identity; refusing unsafe overwrite"
+            )
         self._replace_ledger(record, commit=commit)
 
     def _replace_ledger(self, record: L1Record, *, commit: bool = True) -> None:
         statement = (
             "INSERT OR REPLACE INTO records "
-            "(source_id, profile, session_id, channel_id, revision, content, metadata_json, created_at, updated_at, is_deleted) "
+            "(source_id, profile, session_id, channel_id, revision, content, "
+            "metadata_json, created_at, updated_at, is_deleted) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         values = (
@@ -371,7 +375,7 @@ class MnemosyneL1Adapter(L1Adapter):
     def _ledger_row(self, source_id: str) -> sqlite3.Row | None:
         if not isinstance(source_id, str) or not source_id:
             return None
-        return self._ledger.execute(
+        return self._ledger.execute(  # type: ignore[no-any-return]
             "SELECT * FROM records "
             "WHERE source_id = ? AND profile = ? AND session_id = ? AND channel_id = ?",
             (source_id, self.profile, self.session_id, self.channel_id),
@@ -397,7 +401,7 @@ class MnemosyneL1Adapter(L1Adapter):
             result = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise RuntimeError("Mnemosyne record contains an invalid timestamp") from exc
-        return result if result.tzinfo is not None else result.replace(tzinfo=timezone.utc)
+        return result if result.tzinfo is not None else result.replace(tzinfo=UTC)
 
     @staticmethod
     def _validate_scope(profile: str, bank: str, session_id: str, channel_id: str) -> None:
@@ -410,7 +414,9 @@ class MnemosyneL1Adapter(L1Adapter):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
         if not all(character.isalnum() or character in "-_" for character in bank):
-            raise ValueError("bank must contain only alphanumeric characters, hyphens, or underscores")
+            raise ValueError(
+                "bank must contain only alphanumeric characters, hyphens, or underscores"
+            )
 
     @staticmethod
     def _validate_input(content: str, metadata: dict[str, Any]) -> None:

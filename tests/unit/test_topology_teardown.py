@@ -7,7 +7,6 @@ import subprocess
 import uuid
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "e2e-topology" / "topology.sh"
 

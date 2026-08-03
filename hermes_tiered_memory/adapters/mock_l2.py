@@ -9,7 +9,7 @@ from hermes_tiered_memory.adapters.l2 import L2Adapter, L2Document, L2RetainResu
 class MockL2Adapter(L2Adapter):
     """Mock L2 adapter for testing."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the mock L2 adapter."""
         self._documents: dict[str, L2Document] = {}
         self._operations: dict[str, dict[str, Any]] = {}
@@ -82,7 +82,7 @@ class MockL2Adapter(L2Adapter):
     def recall(self, query: str, bank_id: str, limit: int = 10) -> list[L2Document]:
         """Recall documents from L2."""
         # Simple substring match for testing
-        results = []
+        results: list[L2Document] = []
         query_lower = query.lower()
 
         for doc in self._documents.values():
