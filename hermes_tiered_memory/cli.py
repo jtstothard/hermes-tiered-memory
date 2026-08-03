@@ -10,7 +10,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -36,13 +36,13 @@ def _memory_tiered_patch(
     """Return a deterministic, reviewable YAML fragment for memory.tiered."""
     lines = [
         "memory:",
-        "  provider: \"tiered\"",
+        '  provider: "tiered"',
         "  tiered:",
         "    hindsight:",
         f"      auth_mode: {_yaml_scalar(auth_mode)}",
         "    verification_keys:",
         "      - key_id: " + _yaml_scalar(key_id),
-        "        algorithm: \"ed25519\"",
+        '        algorithm: "ed25519"',
         "        public_key_b64: " + _yaml_scalar(public_key_b64),
         "    protected_config:",
         "      path: " + _yaml_scalar(str(config_path.resolve())),
@@ -56,7 +56,9 @@ def _memory_tiered_patch(
 def _provision(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    private_path = Path(args.private_key) if args.private_key else output_dir / f"{args.key_id}.private.pem"
+    private_path = (
+        Path(args.private_key) if args.private_key else output_dir / f"{args.key_id}.private.pem"
+    )
     config_path = Path(args.config) if args.config else output_dir / "protected-config.json"
     signature_path = Path(args.signature) if args.signature else output_dir / "protected-config.sig"
     patch_path = Path(args.patch) if args.patch else output_dir / "memory.tiered.patch.yaml"
@@ -71,10 +73,14 @@ def _provision(args: argparse.Namespace) -> int:
             )
 
     private_key, private_pem, public_key_b64 = generate_ed25519_keypair()
-    not_before = _parse_rfc3339(args.not_before) if args.not_before else datetime.now(timezone.utc).isoformat()
-    expires_at = _parse_rfc3339(args.expires_at) if args.expires_at else (
-        datetime.now(timezone.utc) + timedelta(days=365)
-    ).isoformat()
+    not_before = (
+        _parse_rfc3339(args.not_before) if args.not_before else datetime.now(UTC).isoformat()
+    )
+    expires_at = (
+        _parse_rfc3339(args.expires_at)
+        if args.expires_at
+        else (datetime.now(UTC) + timedelta(days=365)).isoformat()
+    )
     issued_at = _parse_rfc3339(args.issued_at) if args.issued_at else not_before
     canonical, signature = build_signed_config(
         private_key,
