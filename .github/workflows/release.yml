@@ -52,7 +52,7 @@ jobs:
       url: https://pypi.org/p/hermes-tiered-memory
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-dist
           path: dist
@@ -66,13 +66,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download distributions and checksums
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-dist
           path: dist
 
       - name: Download checksums
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-checksums
 
