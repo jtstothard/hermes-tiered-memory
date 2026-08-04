@@ -51,7 +51,7 @@ shim. `HERMES_HOME` must already exist:
 
 ```bash
 python3 -m build --wheel
-scripts/install_plugin.sh dist/hermes_tiered_memory-1.0.0-py3-none-any.whl "$HERMES_HOME"
+scripts/install_plugin.sh dist/hermes_tiered_memory-1.0.1-py3-none-any.whl "$HERMES_HOME"
 ```
 
 The script installs the wheel, creates the `tiered-memory` plugin shim, and
