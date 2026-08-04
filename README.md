@@ -5,7 +5,7 @@
 small and explicit, fails closed when dependencies or configuration are invalid,
 and promotes L1 writes through a durable local outbox.
 
-Version: **1.0.1**
+Version: **1.0.2**
 
 ## Public tools
 
@@ -51,7 +51,7 @@ shim. `HERMES_HOME` must already exist:
 
 ```bash
 python3 -m build --wheel
-scripts/install_plugin.sh dist/hermes_tiered_memory-1.0.1-py3-none-any.whl "$HERMES_HOME"
+scripts/install_plugin.sh dist/hermes_tiered_memory-1.0.2-py3-none-any.whl "$HERMES_HOME"
 ```
 
 The script installs the wheel, creates the `tiered-memory` plugin shim, and
