@@ -28,7 +28,7 @@ def _load_tiered_runtime_config() -> dict[str, Any] | None:
     internal ``tiered`` key.
     """
     try:
-        from hermes_cli.config import load_config_readonly  # type: ignore[import-not-found]
+        from hermes_cli.config import load_config_readonly  # type: ignore[import-not-found,import-untyped]
 
         config = load_config_readonly()
     except Exception:
@@ -50,7 +50,7 @@ def _load_tiered_runtime_config() -> dict[str, Any] | None:
 try:
     # The real plugin process imports Hermes' pinned public ABC.  The fallback
     # only lets this library's standalone tests run without Hermes installed.
-    from agent.memory_provider import MemoryProvider  # type: ignore[import-not-found]
+    from agent.memory_provider import MemoryProvider  # type: ignore[import-not-found,import-untyped]
 except ModuleNotFoundError:  # pragma: no cover - standalone test environment
 
     class MemoryProvider(ABC):  # type: ignore[no-redef]
