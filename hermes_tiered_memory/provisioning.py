@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import cryptography.hazmat.primitives.asymmetric.ed25519 as ed25519
@@ -92,7 +92,7 @@ def _parse_rfc3339(value: str) -> str:
         raise SystemExit(f"invalid RFC 3339 timestamp {value!r}: {exc}") from exc
     if dt.tzinfo is None:
         raise SystemExit(f"timestamp must include a UTC offset: {value!r}")
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.astimezone(UTC).isoformat()
 
 
 __all__ = [

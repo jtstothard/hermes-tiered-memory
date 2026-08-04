@@ -1,6 +1,6 @@
 # Installing hermes-tiered-memory
 
-This guide installs the v1.0.0 package and makes it discoverable as a Hermes
+This guide installs the package and makes it discoverable as a Hermes
 memory plugin.
 
 ## Requirements
@@ -24,7 +24,7 @@ interpreter used by Hermes:
 python3 -m pip install build
 python3 -m build --wheel
 PYTHON=python3 scripts/install_plugin.sh \
-  dist/hermes_tiered_memory-1.0.0-py3-none-any.whl "$HERMES_HOME"
+  dist/hermes_tiered_memory-1.0.2-py3-none-any.whl "$HERMES_HOME"
 ```
 
 The installer pip-installs the wheel, verifies the import, creates

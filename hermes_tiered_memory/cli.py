@@ -271,7 +271,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "provision" or args.command == "doctor":
-        return args.func(args)
+        result: int = args.func(args)
+        return result
 
     parser.print_help()
     return 1
