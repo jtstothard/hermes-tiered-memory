@@ -192,14 +192,15 @@ def test_built_wheel_metadata_version_matches_release(tmp_path: Path) -> None:
         assert metadata_names, f"no METADATA in {wheel_path.name}"
         metadata = zf.read(metadata_names[0]).decode("utf-8", errors="replace")
 
-    # METADATA is RFC 822-style: headers, a blank line, then the body. Only the
-    # header section contains real headers; the body (long description) can
-    # contain markdown like "Version: **1.0.1**" that must not be counted.
-    header_section = metadata.split("\n\n", 1)[0]
-    version_lines = [line for line in header_section.splitlines() if line.startswith("Version:")]
-    assert version_lines, f"no Version: header in {wheel_path.name} METADATA"
-    assert len(version_lines) == 1, f"multiple Version headers: {version_lines}"
-    declared = version_lines[0].split(":", 1)[1].strip()
+    # METADATA is RFC 822-style. Use the stdlib email parser to correctly
+    # handle CRLF line endings, case-insensitive header names, and folded
+    # continuation lines — a naive split() misses all three.
+    import email
+
+    msg = email.message_from_string(metadata)
+    declared = msg.get("Version")
+    assert declared is not None, f"no Version: header in {wheel_path.name} METADATA"
+    declared = declared.strip()
     assert (
         declared == EXPECTED_VERSION
     ), f"wheel METADATA Version is {declared!r}, expected {EXPECTED_VERSION!r}"
