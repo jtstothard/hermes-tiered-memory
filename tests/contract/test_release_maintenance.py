@@ -151,15 +151,23 @@ def test_built_wheel_metadata_version_matches_release(tmp_path: Path) -> None:
     """Build a wheel in an isolated tmp dir and verify its METADATA Version field.
 
     This is the end-to-end release artifact that ships to PyPI; its declared
-    version must equal the source version. Skips cleanly when the PEP 517
-    `build` frontend is unavailable rather than masking the failure.
+    version must equal the source version. ``build`` is a declared test extra,
+    so absence is a dependency-resolution failure (raise) rather than a skip.
+    A broken build install (missing submodule deps) also fails rather than skips.
     """
-    try:
-        import build.__main__  # noqa: F401
-    except ModuleNotFoundError:
+    import importlib.util
+
+    spec = importlib.util.find_spec("build")
+    if spec is None:
         import pytest
 
-        pytest.skip("PEP 517 build frontend not installed in this environment")
+        pytest.fail(
+            "PEP 517 build frontend is not installed; the wheel-metadata "
+            "contract cannot be enforced. Add 'build' to the test extras."
+        )
+    # Force the real import — any ModuleNotFoundError from a broken install is a
+    # real failure, not a reason to skip.
+    import build.__main__  # noqa: F401
 
     build_result = subprocess.run(
         [sys.executable, "-m", "build", "--wheel", "--outdir", str(tmp_path), str(REPO_ROOT)],
