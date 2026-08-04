@@ -5,7 +5,7 @@
 small and explicit, fails closed when dependencies or configuration are invalid,
 and promotes L1 writes through a durable local outbox.
 
-Version: **1.0.0**
+Version: **1.0.1**
 
 ## Public tools
 

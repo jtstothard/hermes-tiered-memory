@@ -2,6 +2,20 @@
 
 All notable public changes are recorded here.
 
+## [1.0.1] — 2026-08-03
+
+### Added
+- `LICENSE` file (MIT) — was declared in metadata but missing from repo root
+- `SECURITY.md` — security policy and vulnerability reporting process
+- `CONTRIBUTING.md` — development workflow and contribution guidelines
+- `.github/FUNDING.yml` — Ko-fi sponsorship link (`trshpotato`)
+- `.github/dependabot.yml` — weekly dependency and GitHub Actions updates
+- `.github/PULL_REQUEST_TEMPLATE.md` and issue templates (bug/feature)
+- `py.typed` marker file (PEP 561) — ships in the wheel for type-checker support
+
+### Changed
+- Version bumped to 1.0.1
+
 ## [1.0.0] — 2026-08-03
 
 ### Added
