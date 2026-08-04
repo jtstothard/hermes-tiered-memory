@@ -18,7 +18,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 README = REPO_ROOT / "README.md"
 INSTALL = REPO_ROOT / "INSTALL.md"
 
-EXPECTED_VERSION = "1.0.1"
+EXPECTED_VERSION = "1.0.2"
 WHEEL_FILENAME = f"hermes_tiered_memory-{EXPECTED_VERSION}-py3-none-any.whl"
 # Release-version references in prose use a "v" prefix (e.g. "v1.0.0"). Bare
 # semver strings are ignored: dependency specs like "hermes-agent>=0.7.0" are

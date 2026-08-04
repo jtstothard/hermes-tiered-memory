@@ -78,7 +78,7 @@ echo ">> Writing plugin.yaml ..."
 cat > "$PLUGIN_DIR/plugin.yaml" << YAML
 name: ${PLUGIN_NAME}
 description: "${PLUGIN_DESCRIPTION}"
-version: "1.0.1"
+version: "1.0.2"
 YAML
 
 echo ""
