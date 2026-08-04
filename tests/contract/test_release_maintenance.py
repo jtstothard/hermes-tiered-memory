@@ -192,7 +192,11 @@ def test_built_wheel_metadata_version_matches_release(tmp_path: Path) -> None:
         assert metadata_names, f"no METADATA in {wheel_path.name}"
         metadata = zf.read(metadata_names[0]).decode("utf-8", errors="replace")
 
-    version_lines = [line for line in metadata.splitlines() if line.lower().startswith("version:")]
+    # METADATA is RFC 822-style: headers, a blank line, then the body. Only the
+    # header section contains real headers; the body (long description) can
+    # contain markdown like "Version: **1.0.1**" that must not be counted.
+    header_section = metadata.split("\n\n", 1)[0]
+    version_lines = [line for line in header_section.splitlines() if line.startswith("Version:")]
     assert version_lines, f"no Version: header in {wheel_path.name} METADATA"
     assert len(version_lines) == 1, f"multiple Version headers: {version_lines}"
     declared = version_lines[0].split(":", 1)[1].strip()
