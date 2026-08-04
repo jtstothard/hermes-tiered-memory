@@ -46,25 +46,19 @@ def test_install_plugin_generates_matching_metadata() -> None:
 
 def test_readme_wheel_filename_matches_release() -> None:
     readme = README.read_text(encoding="utf-8")
-    assert WHEEL_FILENAME in readme, (
-        f"README.md does not reference the {WHEEL_FILENAME} wheel"
-    )
+    assert WHEEL_FILENAME in readme, f"README.md does not reference the {WHEEL_FILENAME} wheel"
 
 
 def test_install_wheel_filename_matches_release() -> None:
     install = INSTALL.read_text(encoding="utf-8")
-    assert WHEEL_FILENAME in install, (
-        f"INSTALL.md does not reference the {WHEEL_FILENAME} wheel"
-    )
+    assert WHEEL_FILENAME in install, f"INSTALL.md does not reference the {WHEEL_FILENAME} wheel"
 
 
 def test_install_guide_does_not_reference_stale_release_version() -> None:
     """The install guide prose must not claim a different release than the source."""
     install = INSTALL.read_text(encoding="utf-8")
     stale_prose = STALE_PROSE_RE.search(install)
-    assert stale_prose is None, (
-        f"INSTALL.md still pins prose to {stale_prose.group(0)!r}"
-    )
+    assert stale_prose is None, f"INSTALL.md still pins prose to {stale_prose.group(0)!r}"
 
 
 def test_subprocess_status_smoke_preserves_child_status() -> None:
