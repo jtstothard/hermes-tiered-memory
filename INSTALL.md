@@ -1,6 +1,6 @@
 # Installing hermes-tiered-memory
 
-This guide installs the v1.0.0 package and makes it discoverable as a Hermes
+This guide installs the package and makes it discoverable as a Hermes
 memory plugin.
 
 ## Requirements
