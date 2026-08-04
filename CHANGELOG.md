@@ -2,6 +2,22 @@
 
 All notable public changes are recorded here.
 
+## [1.0.2] — 2026-08-04
+
+### Fixed
+- Corrected source `__version__` mismatch: runtime version now matches the
+  package metadata (`1.0.2`). The published 1.0.1 wheel reported `1.0.1` in
+  its METADATA but `1.0.0` at runtime; this release resynchronizes them.
+- Wheel METADATA version parsing in release contract tests now uses
+  `email.message_from_string` (RFC 822 compliant) instead of naive string
+  splitting — handles CRLF, case-insensitive headers, and folded continuation
+  lines correctly.
+
+### Changed
+- Version bumped to 1.0.2.
+- Release contract tests now declare `build>=1.0.0` in test extras and fail
+  (rather than skip) when build tooling is unavailable.
+
 ## [1.0.1] — 2026-08-03
 
 ### Added
