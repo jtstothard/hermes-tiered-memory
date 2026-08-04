@@ -19,12 +19,14 @@ INSTALL = REPO_ROOT / "INSTALL.md"
 
 EXPECTED_VERSION = "1.0.1"
 WHEEL_FILENAME = f"hermes_tiered_memory-{EXPECTED_VERSION}-py3-none-any.whl"
+STALE_PROSE_RE = re.compile(r"installs the v\d+\.\d+\.\d+ package")
+PYPROJECT_VERSION_RE = re.compile(r'^version\s*=\s*"([^"]+)"', re.MULTILINE)
 
 
 def _pyproject_version() -> str:
     """Extract the PEP 621 version from pyproject.toml without tomllib extras."""
     text = PYPROJECT.read_text(encoding="utf-8")
-    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    match = PYPROJECT_VERSION_RE.search(text)
     assert match, "pyproject.toml has no version declaration"
     return match.group(1)
 
@@ -59,7 +61,7 @@ def test_install_wheel_filename_matches_release() -> None:
 def test_install_guide_does_not_reference_stale_release_version() -> None:
     """The install guide prose must not claim a different release than the source."""
     install = INSTALL.read_text(encoding="utf-8")
-    stale_prose = re.search(r"installs the v\d+\.\d+\.\d+ package", install)
+    stale_prose = STALE_PROSE_RE.search(install)
     assert stale_prose is None, (
         f"INSTALL.md still pins prose to {stale_prose.group(0)!r}"
     )
