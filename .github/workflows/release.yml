@@ -32,13 +32,13 @@ jobs:
         run: sha256sum dist/*.whl dist/*.tar.gz > checksums.sha256
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-dist
           path: dist/
 
       - name: Upload checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-checksums
           path: checksums.sha256
